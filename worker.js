@@ -7,9 +7,9 @@
  *
  *  Shared D1 bindings:
  *  - 'DB' for 'configs' table (config management data)
- *  - 'DB' for 'ips' table (cached IP addresses)
+ *  - 'DB' for 'cfips' table (cached IP addresses)
  * 
- *  VERSION: 3.2 (Fixed a typo in the subscription link handler causing Error 1101)
+ *  VERSION: 3.4 (Fixed UNIQUE constraint error by de-duplicating IPs from API)
  * ================================================================= */
 
 // =================================================================
@@ -65,7 +65,7 @@ async function fetchAndStoreIps(env) {
         console.log("Fetching IPs from external API...");
         const response = await fetch(apiUrl, {
             headers: {
-                'User-Agent': 'Cloudflare-Worker-Proxy-Tool/3.2',
+                'User-Agent': 'Cloudflare-Worker-Proxy-Tool/3.4',
                 'Accept': 'application/json',
                 'Origin': 'https://cf.vvhan.com',
                 'Referer': 'https://cf.vvhan.com/',
@@ -111,18 +111,39 @@ async function fetchAndStoreIps(env) {
         if (!db) {
             return { success: false, error: "D1 数据库绑定 'DB' 未找到。" };
         }
+        
+        // [FIX] 新增：在插入数据库前对IP进行去重，防止API返回重复IP导致UNIQUE约束失败
+        const uniqueIpsMap = new Map();
+        newIps.forEach(ipInfo => {
+            if (!uniqueIpsMap.has(ipInfo.ip)) {
+                uniqueIpsMap.set(ipInfo.ip, ipInfo);
+            }
+        });
+        const uniqueNewIps = Array.from(uniqueIpsMap.values());
 
-        console.log(`清空并插入 ${newIps.length} 个新IP到 D1...`);
+        console.log(`从API获取了 ${newIps.length} 个IP，去重后剩余 ${uniqueNewIps.length} 个。准备清空并插入 D1...`);
+        
         const statements = [
-            db.prepare('DELETE FROM ips'),
-            ...newIps.map(ipInfo =>
-                db.prepare('INSERT INTO ips (ip, ip_type, carrier, created_at) VALUES (?, ?, ?, ?)')
+            db.prepare('DELETE FROM cfips'),
+            ...uniqueNewIps.map(ipInfo => // 使用去重后的数组
+                db.prepare('INSERT INTO cfips (ip, ip_type, carrier, created_at) VALUES (?, ?, ?, ?)')
                 .bind(ipInfo.ip, ipInfo.ip_type, ipInfo.carrier, Date.now())
             )
         ];
+
+        // 如果去重后没有任何IP，则只执行删除操作
+        if (uniqueNewIps.length === 0 && newIps.length > 0) {
+            await db.prepare('DELETE FROM cfips').run();
+            console.log("API返回的IP列表为空或无效，仅执行清空操作。");
+            return { success: true, message: "API返回的IP列表为空或无效，仅清空了旧数据。", count: 0 };
+        } else if (uniqueNewIps.length === 0) {
+            console.log("API未返回任何IP，无需操作数据库。");
+            return { success: true, message: "API未返回任何IP，无需更新。", count: 0 }
+        }
+
         await db.batch(statements);
-        console.log(`成功获取并存储了 ${newIps.length} 个IP。`);
-        return { success: true, message: `成功从接口获取并存储了 ${newIps.length} 个IP。`, count: newIps.length };
+        console.log(`成功获取并存储了 ${uniqueNewIps.length} 个IP。`);
+        return { success: true, message: `成功从接口获取并存储了 ${uniqueNewIps.length} 个IP。`, count: uniqueNewIps.length };
 
     } catch (e) {
         console.error("IP获取和存储过程中发生错误:", e.message);
@@ -136,7 +157,7 @@ async function fetchIpsFromDB(ipType, carrierType, env) {
         throw new Error("D1 数据库未绑定或不可用。");
     }
   
-    let query = 'SELECT ip, ip_type, carrier FROM ips WHERE 1=1'; 
+    let query = 'SELECT ip, ip_type, carrier FROM cfips WHERE 1=1'; 
     const params = [];
 
     if (ipType.toLowerCase() !== 'all') {
@@ -542,7 +563,7 @@ export default {
         const manageConfigByIdMatch = manageConfigByIdPattern.exec(url);
         const batchConfigsMatch = batchConfigsPattern.exec(url);
 
-        try { // [ADDED] Wrapping the router in a try...catch block for better error handling
+        try { 
             if (method === 'GET') {
                 if (path === '/') {
                     const pageHtml = generatePageHtmlContent.replace(/YOUR_WORKER_DOMAIN_PATH/g, DOMAIN_NAME);
@@ -558,7 +579,6 @@ export default {
                 if (batchConfigsMatch) {
                     const uuid = batchConfigsMatch.pathname.groups.uuid;
                     const ipType = url.searchParams.get('ipType') || 'all';
-                    // [FIXED] Corrected the typo from searchAtr to searchParams
                     const carrier = url.searchParams.get('carrier') || 'all';
                     return await handleGetBatchConfigs(uuid, ipType, carrier, env);
                 }
@@ -615,7 +635,6 @@ export default {
           
             return new Response('404 Not Found', { status: 404 });
         } catch (err) {
-            // This global catch will handle any unexpected errors, including the typo fix.
             console.error("Caught a fatal error in the fetch handler:", err.stack);
             return new Response("An unexpected error occurred: " + err.message, { status: 500 });
         }
@@ -743,7 +762,7 @@ const generatePageHtmlContent = `
   <div id="toast-container"></div>
   <div class="container">
     <div class="content-group">
-      <h1 class="profile-name">优选IP配置批量生成</h1>
+      <h1 class="profile-name">CF优选配置批量生成</h1>
       <p class="profile-quote">一个用于批量替换代理配置中IP地址的小工具</p>
       
       <div class="nav-grid">

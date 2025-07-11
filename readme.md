@@ -6,7 +6,7 @@
 
    - 确保您的 Cloudflare Worker 已绑定 D1 数据库，且绑定变量名为 `DB`。
 
-   - 在 D1 数据库中创建configs和ips表（如果尚未创建）。可以使用以下 SQL 语句：
+   - 在 D1 数据库中创建configs和cfips表（如果尚未创建）。可以使用以下 SQL 语句：
 
 
 
