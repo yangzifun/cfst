@@ -9,7 +9,7 @@
  *  - 'DB' for 'configs' table (config management data)
  *  - 'DB' for 'cfips' table (cached IP addresses)
  * 
- *  VERSION: 3.4 (Fixed UNIQUE constraint error by de-duplicating IPs from API)
+ *  VERSION: 3.5 (Added mobile responsive layout)
  * ================================================================= */
 
 // =================================================================
@@ -65,7 +65,7 @@ async function fetchAndStoreIps(env) {
         console.log("Fetching IPs from external API...");
         const response = await fetch(apiUrl, {
             headers: {
-                'User-Agent': 'Cloudflare-Worker-Proxy-Tool/3.4',
+                'User-Agent': 'Cloudflare-Worker-Proxy-Tool/3.5',
                 'Accept': 'application/json',
                 'Origin': 'https://cf.vvhan.com',
                 'Referer': 'https://cf.vvhan.com/',
@@ -112,7 +112,6 @@ async function fetchAndStoreIps(env) {
             return { success: false, error: "D1 数据库绑定 'DB' 未找到。" };
         }
         
-        // [FIX] 新增：在插入数据库前对IP进行去重，防止API返回重复IP导致UNIQUE约束失败
         const uniqueIpsMap = new Map();
         newIps.forEach(ipInfo => {
             if (!uniqueIpsMap.has(ipInfo.ip)) {
@@ -125,13 +124,12 @@ async function fetchAndStoreIps(env) {
         
         const statements = [
             db.prepare('DELETE FROM cfips'),
-            ...uniqueNewIps.map(ipInfo => // 使用去重后的数组
+            ...uniqueNewIps.map(ipInfo =>
                 db.prepare('INSERT INTO cfips (ip, ip_type, carrier, created_at) VALUES (?, ?, ?, ?)')
                 .bind(ipInfo.ip, ipInfo.ip_type, ipInfo.carrier, Date.now())
             )
         ];
 
-        // 如果去重后没有任何IP，则只执行删除操作
         if (uniqueNewIps.length === 0 && newIps.length > 0) {
             await db.prepare('DELETE FROM cfips').run();
             console.log("API返回的IP列表为空或无效，仅执行清空操作。");
@@ -646,7 +644,7 @@ export default {
 };
 
 // =================================================================
-//  SECTION 3: HTML, CSS, AND JAVASCRIPT FOR FRONTEND (unchanged from last version)
+//  SECTION 3: HTML, CSS, AND JAVASCRIPT FOR FRONTEND
 // =================================================================
 
 const newGlobalStyle = `
@@ -746,6 +744,72 @@ textarea:focus, input[type="text"]:focus { outline: none; border-color: #3d474d;
     animation: rotation 1s linear infinite; margin-right: 8px;
 }
 @keyframes rotation { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+/* =================================================================
+ *  [新增] 移动端响应式布局样式
+ * ================================================================= */
+@media (max-width: 768px) {
+    html {
+        font-size: 100%; /* 在小屏幕上使用更标准的字体基准，便于rem计算 */
+    }
+    .container {
+        padding: 20px 15px; /* 减小页面整体边距 */
+        justify-content: flex-start; /* 内容从顶部开始，而不是垂直居中 */
+    }
+    .profile-name {
+        font-size: 1.8rem; /* 减小主标题字号 */
+    }
+    .profile-quote {
+        font-size: 0.95rem;
+        margin-bottom: 20px;
+    }
+    .card {
+        padding: 20px 15px; /* 减小卡片内部边距 */
+        margin-bottom: 20px;
+    }
+    .card h2 {
+        font-size: 1.3rem; /* 减小卡片标题字号 */
+    }
+    .nav-btn {
+        padding: 9px 12px; /* 微调按钮内边距，使其更适合触摸 */
+        font-size: 0.9rem;
+    }
+    /* 专为管理页面的表格优化 */
+    .table-container th, .table-container td {
+        padding: 8px 10px; /* 减小单元格边距 */
+        font-size: 0.8rem; /* 减小表格字体 */
+    }
+    .config-data-cell {
+        max-width: 150px; /* 限制数据列的最大宽度，防止撑破布局 */
+    }
+    /* 优化Toast提示框在手机上的显示 */
+    #toast-container {
+        top: 10px;
+        left: 10px;
+        right: 10px;
+        width: auto; /* 宽度自适应 */
+        transform: translateX(0);
+         align-items: center; /* 使toast在容器内居中 */
+    }
+    .toast {
+      width: 100%;
+      max-width: 400px; /* 限制最大宽度，在大屏手机上更好看 */
+      animation: slideDown 0.5s forwards, fadeOut 0.5s 4.5s forwards;
+    }
+    /* 移除旧的动画并定义新的滑入动画 */
+    @keyframes slideDown {
+      from { opacity: 0; transform: translateY(-100%); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+		/* 覆盖原有的fadeOut动画，使其从当前位置消失 */
+		@keyframes fadeOut {
+      from { opacity: 1; }
+      to { opacity: 0; transform: translateY(-20px); }
+    }
+}
+/* =================================================================
+ *  响应式布局样式结束
+ * ================================================================= */
 `;
 
 const generatePageHtmlContent = `
