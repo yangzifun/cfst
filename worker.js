@@ -9,7 +9,7 @@
  *  - 'DB' for 'configs' table (config management data)
  *  - 'DB' for 'cfips' table (cached IP addresses)
  * 
- *  VERSION: 3.5 (Added mobile responsive layout)
+ *  VERSION: 3.6 (Updated IP fetching API to hostmonit.com)
  * ================================================================= */
 
 // =================================================================
@@ -58,53 +58,51 @@ function getProtocol(configStr) {
 // =================================================================
 
 async function fetchAndStoreIps(env) {
-    const apiUrl = 'https://api.vvhan.com/tool/cf_ip';
+    // [修改] 更新 API 端点
+    const apiUrl = 'https://api.hostmonit.com/get_optimization_ip';
     let newIps = [];
 
     try {
-        console.log("Fetching IPs from external API...");
+        console.log("正在从新的 API (api.hostmonit.com) 获取优选IP...");
+        
+        // [修改] 构造新的 fetch 请求，方法改为 POST，并添加必要的 headers 和 body
         const response = await fetch(apiUrl, {
+            method: 'POST',
             headers: {
-                'User-Agent': 'Cloudflare-Worker-Proxy-Tool/3.5',
-                'Accept': 'application/json',
-                'Origin': 'https://cf.vvhan.com',
-                'Referer': 'https://cf.vvhan.com/',
-            }
+                'Content-Type': 'application/json',
+                'referer': 'https://stock.hostmonit.com/',
+                'origin': 'https://stock.hostmonit.com',
+                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+                'accept': 'application/json, text/plain, */*'
+            },
+            body: JSON.stringify({ key: "iDetkOys" }) // API 要求的请求体
         });
 
         if (!response.ok) {
             const errorText = await response.text();
-            throw new Error(`API请求失败: ${response.status} ${response.statusText} - ${errorText.substring(0, 200)}`);
+            throw new Error(`新API请求失败: ${response.status} ${response.statusText} - ${errorText.substring(0, 200)}`);
         }
 
         const data = await response.json();
-        if (data.success && data.data) {
-            const processIpData = (ipData, type, carrierCode) => {
-                if (ipData && Array.isArray(ipData)) {
-                    ipData.forEach(item => {
-                        if (item.ip) {
-                            newIps.push({
-                                ip: type === 'v6' ? `[${item.ip}]` : item.ip,
-                                ip_type: type,
-                                carrier: carrierCode,
-                            });
-                        }
+
+        // [修改] 更新响应数据的解析逻辑以适配新接口的结构
+        if (data.code === 200 && data.info && Array.isArray(data.info)) {
+            data.info.forEach(item => {
+                // 确保 IP 和 线路（运营商）信息存在
+                if (item.ip && item.line) {
+                    // 判断是 IPv4 还是 IPv6
+                    const isV6 = item.ip.includes(':');
+                    
+                    newIps.push({
+                        ip: isV6 ? `[${item.ip}]` : item.ip,   // IPv6 地址需要用方括号包裹
+                        ip_type: isV6 ? 'v6' : 'v4',            // 记录 IP 类型
+                        carrier: item.line,                     // 'line' 字段直接对应运营商代码 (CM, CU, CT)
                     });
                 }
-            };
-
-            if (data.data.v4) {
-                if (data.data.v4.CM) processIpData(data.data.v4.CM, 'v4', 'CM');
-                if (data.data.v4.CU) processIpData(data.data.v4.CU, 'v4', 'CU');
-                if (data.data.v4.CT) processIpData(data.data.v4.CT, 'v4', 'CT');
-            }
-            if (data.data.v6) {
-                if (data.data.v6.CM) processIpData(data.data.v6.CM, 'v6', 'CM');
-                if (data.data.v6.CU) processIpData(data.data.v6.CU, 'v6', 'CU');
-                if (data.data.v6.CT) processIpData(data.data.v6.CT, 'v6', 'CT');
-            }
+            });
         } else {
-            throw new Error('API 响应格式不正确或未成功。');
+            // 如果响应 code 不是 200 或 info 字段不存在，则抛出错误
+            throw new Error('新API响应格式不正确或未成功 (code !== 200)。');
         }
 
         const db = env.DB;
@@ -120,7 +118,7 @@ async function fetchAndStoreIps(env) {
         });
         const uniqueNewIps = Array.from(uniqueIpsMap.values());
 
-        console.log(`从API获取了 ${newIps.length} 个IP，去重后剩余 ${uniqueNewIps.length} 个。准备清空并插入 D1...`);
+        console.log(`从新API获取了 ${newIps.length} 个IP，去重后剩余 ${uniqueNewIps.length} 个。准备清空并插入 D1...`);
         
         const statements = [
             db.prepare('DELETE FROM cfips'),
@@ -130,21 +128,19 @@ async function fetchAndStoreIps(env) {
             )
         ];
 
-        if (uniqueNewIps.length === 0 && newIps.length > 0) {
+        if (uniqueNewIps.length === 0) {
+            // 如果 API 返回数据但解析后为空，也执行清空操作，以确保数据最新
             await db.prepare('DELETE FROM cfips').run();
-            console.log("API返回的IP列表为空或无效，仅执行清空操作。");
-            return { success: true, message: "API返回的IP列表为空或无效，仅清空了旧数据。", count: 0 };
-        } else if (uniqueNewIps.length === 0) {
-            console.log("API未返回任何IP，无需操作数据库。");
-            return { success: true, message: "API未返回任何IP，无需更新。", count: 0 }
+            console.log("新API返回的IP列表为空或无效，仅执行清空操作。");
+            return { success: true, message: "新API返回的IP列表为空或无效，已清空旧数据。", count: 0 };
         }
 
         await db.batch(statements);
-        console.log(`成功获取并存储了 ${uniqueNewIps.length} 个IP。`);
-        return { success: true, message: `成功从接口获取并存储了 ${uniqueNewIps.length} 个IP。`, count: uniqueNewIps.length };
+        console.log(`成功从新API获取并存储了 ${uniqueNewIps.length} 个IP。`);
+        return { success: true, message: `成功从新接口获取并存储了 ${uniqueNewIps.length} 个IP。`, count: uniqueNewIps.length };
 
     } catch (e) {
-        console.error("IP获取和存储过程中发生错误:", e.message);
+        console.error("新IP获取和存储过程中发生错误:", e.message);
         return { success: false, error: e.message };
     }
 }
@@ -645,6 +641,7 @@ export default {
 
 // =================================================================
 //  SECTION 3: HTML, CSS, AND JAVASCRIPT FOR FRONTEND
+// (The HTML content remains unchanged from your original script)
 // =================================================================
 
 const newGlobalStyle = `
@@ -1259,3 +1256,4 @@ const managePageHtmlContent = `
 </body>
 </html>
 `;
+
