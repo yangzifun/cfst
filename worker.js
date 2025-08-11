@@ -9,7 +9,7 @@
  *  - 'DB' for 'configs' table (config management data)
  *  - 'DB' for 'cfips' table (cached IP addresses)
  * 
- *  VERSION: 3.6 (Updated IP fetching API to hostmonit.com)
+ *  VERSION: 3.8 (High-Availability - Dual API Fetching with Fallback)
  * ================================================================= */
 
 // =================================================================
@@ -57,93 +57,156 @@ function getProtocol(configStr) {
 //  SECTION 1: IP Replacement & Batch Generation Logic
 // =================================================================
 
-async function fetchAndStoreIps(env) {
-    // [修改] 更新 API 端点
+/**
+ * 从 hostmonit.com API 获取IP。
+ * @returns {Array<Object>} IP数据数组
+ * @throws {Error} 如果获取失败或数据格式不正确
+ */
+async function fetchIpsFromHostMonit() {
     const apiUrl = 'https://api.hostmonit.com/get_optimization_ip';
-    let newIps = [];
+    console.log("正在从主 API (api.hostmonit.com) 获取优选IP...");
 
-    try {
-        console.log("正在从新的 API (api.hostmonit.com) 获取优选IP...");
-        
-        // [修改] 构造新的 fetch 请求，方法改为 POST，并添加必要的 headers 和 body
-        const response = await fetch(apiUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'referer': 'https://stock.hostmonit.com/',
-                'origin': 'https://stock.hostmonit.com',
-                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
-                'accept': 'application/json, text/plain, */*'
-            },
-            body: JSON.stringify({ key: "iDetkOys" }) // API 要求的请求体
-        });
+    const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'referer': 'https://stock.hostmonit.com/',
+            'origin': 'https://stock.hostmonit.com',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+            'accept': 'application/json, text/plain, */*'
+        },
+        body: JSON.stringify({ key: "iDetkOys" }) // API 要求的请求体
+    });
 
-        if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`新API请求失败: ${response.status} ${response.statusText} - ${errorText.substring(0, 200)}`);
-        }
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`主API请求失败: ${response.status} ${response.statusText} - ${errorText.substring(0, 200)}`);
+    }
 
-        const data = await response.json();
+    const data = await response.json();
 
-        // [修改] 更新响应数据的解析逻辑以适配新接口的结构
-        if (data.code === 200 && data.info && Array.isArray(data.info)) {
-            data.info.forEach(item => {
-                // 确保 IP 和 线路（运营商）信息存在
-                if (item.ip && item.line) {
-                    // 判断是 IPv4 还是 IPv6
-                    const isV6 = item.ip.includes(':');
-                    
-                    newIps.push({
-                        ip: isV6 ? `[${item.ip}]` : item.ip,   // IPv6 地址需要用方括号包裹
-                        ip_type: isV6 ? 'v6' : 'v4',            // 记录 IP 类型
-                        carrier: item.line,                     // 'line' 字段直接对应运营商代码 (CM, CU, CT)
-                    });
-                }
-            });
-        } else {
-            // 如果响应 code 不是 200 或 info 字段不存在，则抛出错误
-            throw new Error('新API响应格式不正确或未成功 (code !== 200)。');
-        }
-
-        const db = env.DB;
-        if (!db) {
-            return { success: false, error: "D1 数据库绑定 'DB' 未找到。" };
-        }
-        
-        const uniqueIpsMap = new Map();
-        newIps.forEach(ipInfo => {
-            if (!uniqueIpsMap.has(ipInfo.ip)) {
-                uniqueIpsMap.set(ipInfo.ip, ipInfo);
+    if (data.code === 200 && data.info && Array.isArray(data.info)) {
+        const ips = [];
+        data.info.forEach(item => {
+            if (item.ip && item.line) {
+                const isV6 = item.ip.includes(':');
+                ips.push({
+                    ip: isV6 ? `[${item.ip}]` : item.ip,
+                    ip_type: isV6 ? 'v6' : 'v4',
+                    carrier: item.line,
+                });
             }
         });
-        const uniqueNewIps = Array.from(uniqueIpsMap.values());
+        return ips;
+    } else {
+        throw new Error(`主API响应格式不正确或未成功 (code !== 200)。原始响应: ${JSON.stringify(data).substring(0, 200)}`);
+    }
+}
 
-        console.log(`从新API获取了 ${newIps.length} 个IP，去重后剩余 ${uniqueNewIps.length} 个。准备清空并插入 D1...`);
+/**
+ * 从 vps789.com API 获取IP。
+ * @returns {Array<Object>} IP数据数组
+ * @throws {Error} 如果获取失败或数据格式不正确
+ */
+async function fetchIpsFromVps789() {
+    const apiUrl = 'https://vps789.com/public/sum/cfIpApi';
+    console.log("正在从备用 API (vps789.com) 获取优选IP...");
+
+    const response = await fetch(apiUrl, {
+        method: 'GET',
+        headers: {
+            'User-Agent': 'Cloudflare-Worker-Proxy-Tool/3.8',
+            'Accept': 'application/json'
+        }
+    });
+
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`备用API请求失败: ${response.status} ${response.statusText} - ${errorText.substring(0, 200)}`);
+    }
+
+    const data = await response.json();
+
+    if (data.data && data.data.info && Array.isArray(data.data.info)) {
+        const ips = [];
+        data.data.info.forEach(item => {
+            if (item.ip && item.ipv && item.isp) {
+                ips.push({
+                    ip: item.ipv === 6 ? `[${item.ip}]` : item.ip,
+                    ip_type: `v${item.ipv}`,
+                    carrier: item.isp.toUpperCase(),
+                });
+            }
+        });
+        return ips;
+    } else {
+        throw new Error(`备用API响应格式不正确或未成功。原始响应: ${JSON.stringify(data).substring(0, 200)}`);
+    }
+}
+
+async function fetchAndStoreIps(env) {
+    let newIps = [];
+    let fetchAttempted = false; // 标记是否至少尝试了一种API
+
+    try {
+        // 尝试从主 API 获取
+        newIps = await fetchIpsFromHostMonit();
+        fetchAttempted = true;
+        console.log(`成功从主API获取到 ${newIps.length} 个IP。`);
+    } catch (e) {
+        console.warn(`从主API获取IP失败: ${e.message}。尝试使用备用API...`);
+        try {
+            // 尝试从备用 API 获取
+            newIps = await fetchIpsFromVps789();
+            fetchAttempted = true;
+            console.log(`成功从备用API获取到 ${newIps.length} 个IP。`);
+        } catch (e2) {
+            fetchAttempted = true; // 即使备用API也失败，也标记为已尝试
+            console.error(`从两个API获取IP均失败: 主API失败原因是 "${e.message}"，备用API失败原因是 "${e2.message}"。`);
+            // 不抛出错误，而是返回失败状态，以便调度器继续运行或不影响其他功能
+            return { success: false, error: `获取IP失败: 主API (${e.message}), 备用API (${e2.message})` };
+        }
+    }
+
+    const db = env.DB;
+    if (!db) {
+        return { success: false, error: "D1 数据库绑定 'DB' 未找到。" };
+    }
+
+    // 如果两个API都尝试过，但一个都没成功获取到IPs，则不进行数据库操作，保留旧数据。
+    if (fetchAttempted && newIps.length === 0) {
+        console.warn("未能从任何API获取到有效IP列表。不执行数据库更新以保留现有数据。");
+        return { success: true, message: "未能从任何API获取到有效IP列表，已保留旧数据。", count: 0 };
+    }
+    
+    const uniqueIpsMap = new Map();
+    newIps.forEach(ipInfo => {
+        if (!uniqueIpsMap.has(ipInfo.ip)) {
+            uniqueIpsMap.set(ipInfo.ip, ipInfo);
+        }
+    });
+    const uniqueNewIps = Array.from(uniqueIpsMap.values());
+
+    try {
+        console.log(`总共获取了 ${newIps.length} 个IP，去重后剩余 ${uniqueNewIps.length} 个。准备清空并插入 D1...`);
         
         const statements = [
-            db.prepare('DELETE FROM cfips'),
+            db.prepare('DELETE FROM cfips'), // 清空旧数据
             ...uniqueNewIps.map(ipInfo =>
                 db.prepare('INSERT INTO cfips (ip, ip_type, carrier, created_at) VALUES (?, ?, ?, ?)')
                 .bind(ipInfo.ip, ipInfo.ip_type, ipInfo.carrier, Date.now())
             )
         ];
 
-        if (uniqueNewIps.length === 0) {
-            // 如果 API 返回数据但解析后为空，也执行清空操作，以确保数据最新
-            await db.prepare('DELETE FROM cfips').run();
-            console.log("新API返回的IP列表为空或无效，仅执行清空操作。");
-            return { success: true, message: "新API返回的IP列表为空或无效，已清空旧数据。", count: 0 };
-        }
-
         await db.batch(statements);
-        console.log(`成功从新API获取并存储了 ${uniqueNewIps.length} 个IP。`);
-        return { success: true, message: `成功从新接口获取并存储了 ${uniqueNewIps.length} 个IP。`, count: uniqueNewIps.length };
-
-    } catch (e) {
-        console.error("新IP获取和存储过程中发生错误:", e.message);
-        return { success: false, error: e.message };
+        console.log(`成功从API获取并存储了 ${uniqueNewIps.length} 个IP。`);
+        return { success: true, message: `成功从主/备接口获取并存储了 ${uniqueNewIps.length} 个IP。`, count: uniqueNewIps.length };
+    } catch (dbError) {
+        console.error("IP存储到D1过程中发生错误:", dbError.message);
+        return { success: false, error: `数据库操作失败: ${dbError.message}` };
     }
 }
+
 
 async function fetchIpsFromDB(ipType, carrierType, env) {
     const db = env.DB;
@@ -588,10 +651,11 @@ export default {
 
                 try {
                     if (ipSource === 'api') {
-                        const apiResult = await fetchAndStoreIps(env);
+                        const apiResult = await fetchAndStoreIps(env); // 调用带有容灾逻辑的函数
                         if (!apiResult.success) {
                             console.warn(`用户触发的API更新失败: ${apiResult.error}`);
-                            return jsonResponse({ error: `API更新失败: ${apiResult.error}` }, 500);
+                            // 不抛出错误，而是返回一个指示错误的jsonResponse，以便前端可以显示信息
+                            return jsonResponse({ error: `API更新失败: ${apiResult.error}`, message: apiResult.message }, 500);
                         }
                     }
                     const ips = await fetchIpsFromDB(ipType, carrierType, env);
@@ -635,6 +699,7 @@ export default {
     },
 
     async scheduled(controller, env, ctx) {
+        // 定时任务只负责获取并存储IP，不抛出错误中断调度
         ctx.waitUntil(fetchAndStoreIps(env));
     }
 };
@@ -1256,4 +1321,3 @@ const managePageHtmlContent = `
 </body>
 </html>
 `;
-
