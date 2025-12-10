@@ -880,8 +880,8 @@ const generatePageHtmlContent = `
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="icon" href="https://s3.yangzihome.space/logo.ico" type="image/x-icon">
-  <title>优选IP配置批量生成</title>
+  <link rel="icon" href="https://s3.yangzifun.org/logo.ico" type="image/x-icon">
+  <title>YZFN 优选配置生成</title>
   <style>${newGlobalStyle}</style>
 </head>
 <body>
@@ -961,7 +961,7 @@ const generatePageHtmlContent = `
       <button id="copyResultButton" class="nav-btn" style="width:100%; margin-top: 10px;" onclick="copyResults()">复制结果 (Base64)</button>
 
       <footer class="footer">
-        <p>Powered by YZFN | <a href="https://www.yangzihome.space/security-statement" target="_blank" rel="noopener noreferrer">安全声明</a></p>
+        <p>Powered by YZFN | <a href="https://www.yangzihome.space/security.html" target="_blank" rel="noopener noreferrer">安全声明</a></p>
       </footer>
     </div>
   </div>
@@ -1116,7 +1116,7 @@ const managePageHtmlContent = `
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="icon" href="https://s3.yangzihome.space/logo.ico" type="image/x-icon">
+  <link rel="icon" href="https://s3.yangzifun.org/logo.ico" type="image/x-icon">
   <title>基础配置管理器</title>
   <style>${newGlobalStyle}
     .table-container { overflow-x: auto; border: 2px solid #89949B; border-radius: 4px; background: #fff; margin-top:20px;}
