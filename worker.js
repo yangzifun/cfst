@@ -8,8 +8,8 @@
  *  Shared D1 bindings:
  *  - 'DB' for 'configs' table (config management data)
  *  - 'DB' for 'cfips' table (cached IP addresses)
- * 
- *  VERSION: 3.8 (High-Availability - Dual API Fetching with Fallback)
+ *
+ *  VERSION: 3.9.2 (Fixed apiResult scope error in /fetch-ips)
  * ================================================================= */
 
 // =================================================================
@@ -109,13 +109,14 @@ async function fetchIpsFromHostMonit() {
  * @throws {Error} 如果获取失败或数据格式不正确
  */
 async function fetchIpsFromVps789() {
-    const apiUrl = 'https://vps789.com/public/sum/cfIpApi';
+    // 1. 更新 API URL
+    const apiUrl = 'https://vps789.com/openApi/cfIpApi';
     console.log("正在从备用 API (vps789.com) 获取优选IP...");
 
     const response = await fetch(apiUrl, {
         method: 'GET',
         headers: {
-            'User-Agent': 'Cloudflare-Worker-Proxy-Tool/3.8',
+            'User-Agent': 'Cloudflare-Worker-Proxy-Tool/3.9.2', // 更新User-Agent版本号
             'Accept': 'application/json'
         }
     });
@@ -127,69 +128,126 @@ async function fetchIpsFromVps789() {
 
     const data = await response.json();
 
-    if (data.data && data.data.info && Array.isArray(data.data.info)) {
+    // 2. 检查新的响应结构: {"code":0,"message":"true","count":0,"data":{...}}
+    if (data.code === 0 && data.message === "true" && data.data) {
         const ips = [];
-        data.data.info.forEach(item => {
-            if (item.ip && item.ipv && item.isp) {
-                ips.push({
-                    ip: item.ipv === 6 ? `[${item.ip}]` : item.ip,
-                    ip_type: `v${item.ipv}`,
-                    carrier: item.isp.toUpperCase(),
-                });
+        const carrierGroups = data.data; // 这个对象包含 CT, CU, CM, AllAvg 等键
+
+        for (const carrierKey in carrierGroups) {
+            // 确保属性是对象自身的，而非原型链上的
+            if (Object.prototype.hasOwnProperty.call(carrierGroups, carrierKey)) {
+                const ipListForCarrier = carrierGroups[carrierKey];
+                let currentCarrier;
+
+                // 3. 根据分组键名推导 carrier 类型
+                switch (carrierKey.toUpperCase()) {
+                    case 'CT': currentCarrier = 'CT'; break;
+                    case 'CU': currentCarrier = 'CU'; break;
+                    case 'CM': currentCarrier = 'CM'; break;
+                    case 'ALLAVG': currentCarrier = 'ALL'; break; // 将 AllAvg 归类为通用/全部运营商
+                    default:
+                        console.warn(`vps789.com API返回未知运营商分组: ${carrierKey}。已跳过。`);
+                        continue;
+                }
+
+                if (Array.isArray(ipListForCarrier)) {
+                    ipListForCarrier.forEach(item => {
+                        if (item.ip && typeof item.ip === 'string') {
+                            // 4. 根据 IP 地址本身判断 ip_type (IPv4 或 IPv6)
+                            const isV6 = item.ip.includes(':');
+                            ips.push({
+                                ip: isV6 ? `[${item.ip}]` : item.ip, // IPv6 地址在某些contexts (如URL的hostname部分) 需要用方括号括起来
+                                ip_type: isV6 ? 'v6' : 'v4',
+                                carrier: currentCarrier, // 使用推导出的运营商
+                            });
+                        }
+                    });
+                }
             }
-        });
+        }
         return ips;
     } else {
-        throw new Error(`备用API响应格式不正确或未成功。原始响应: ${JSON.stringify(data).substring(0, 200)}`);
+        // 5. 增强错误处理，即使响应码为OK，如果内部数据结构不符，也抛出错误
+        const partialData = JSON.stringify(data).substring(0, 500); // 截断部分数据用于日志
+        throw new Error(`备用API响应格式不正确或未成功 (code !== 0 或 message !== "true")。部分响应内容: ${partialData}...`);
     }
 }
 
+/**
+ * 同时从两个API获取IP，合并并去重，然后存储到D1。
+ * 如果所有API都获取失败，将返回错误。如果部分API失败但有成功获取的IP，将处理成功部分。
+ * 如果最终没有获取到有效IP，不更新数据库。
+ * @param {Env} env Worker的环境变量
+ * @returns {Promise<{success: boolean, message: string, count?: number, error?: string, details?: string}>}
+ */
 async function fetchAndStoreIps(env) {
-    let newIps = [];
-    let fetchAttempted = false; // 标记是否至少尝试了一种API
+    let allFetchedIps = [];
+    let apiFetchStatusMessages = []; // 记录每个API的获取状态，用于返回给用户或日志
+    let hasSuccessfulFetch = false;
 
-    try {
-        // 尝试从主 API 获取
-        newIps = await fetchIpsFromHostMonit();
-        fetchAttempted = true;
-        console.log(`成功从主API获取到 ${newIps.length} 个IP。`);
-    } catch (e) {
-        console.warn(`从主API获取IP失败: ${e.message}。尝试使用备用API...`);
-        try {
-            // 尝试从备用 API 获取
-            newIps = await fetchIpsFromVps789();
-            fetchAttempted = true;
-            console.log(`成功从备用API获取到 ${newIps.length} 个IP。`);
-        } catch (e2) {
-            fetchAttempted = true; // 即使备用API也失败，也标记为已尝试
-            console.error(`从两个API获取IP均失败: 主API失败原因是 "${e.message}"，备用API失败原因是 "${e2.message}"。`);
-            // 不抛出错误，而是返回失败状态，以便调度器继续运行或不影响其他功能
-            return { success: false, error: `获取IP失败: 主API (${e.message}), 备用API (${e2.message})` };
+    // 使用 Promise.allSettled 并发调用两个API
+    // 这样即使其中一个失败，另一个也能继续，并且我们能获取到每个Promise的状态
+    const results = await Promise.allSettled([
+        fetchIpsFromHostMonit(),
+        fetchIpsFromVps789()
+    ]);
+
+    results.forEach((result, index) => {
+        const apiName = index === 0 ? '主API (api.hostmonit.com)' : '备用API (vps789.com)';
+        if (result.status === 'fulfilled') {
+            allFetchedIps.push(...result.value);
+            apiFetchStatusMessages.push(`${apiName} 成功获取 ${result.value.length} 个IP`);
+            hasSuccessfulFetch = true;
+            console.log(`${apiName} 成功获取到 ${result.value.length} 个IP。`);
+        } else {
+            // result.reason 包含 Promise 拒绝的原因 (即抛出的Error)
+            // 截断错误信息，避免过长的日志
+            const errorMessage = result.reason ? result.reason.message.substring(0, 150) : '未知错误';
+            apiFetchStatusMessages.push(`${apiName} 获取失败: ${errorMessage}`);
+            console.warn(`${apiName} 获取IP失败: ${errorMessage}`);
         }
+    });
+
+    // 如果所有API都没有成功获取到任何IP (allFetchedIps为空，且hasSuccessfulFetch为false)
+    if (!hasSuccessfulFetch) {
+        const errorSummary = apiFetchStatusMessages.join('; ');
+        console.error(`所有IP获取API均失败: ${errorSummary}`);
+        // 返回明确的错误信息，但不会中断调度器
+        return { success: false, error: `所有IP获取API均失败。详情: ${errorSummary}` };
     }
 
     const db = env.DB;
     if (!db) {
-        return { success: false, error: "D1 数据库绑定 'DB' 未找到。" };
+        // 如果有成功获取的IP，但数据库不可用，则应该返回错误
+        return { success: false, error: "D1 数据库绑定 'DB' 未找到，无法存储IP。" };
     }
 
-    // 如果两个API都尝试过，但一个都没成功获取到IPs，则不进行数据库操作，保留旧数据。
-    if (fetchAttempted && newIps.length === 0) {
-        console.warn("未能从任何API获取到有效IP列表。不执行数据库更新以保留现有数据。");
-        return { success: true, message: "未能从任何API获取到有效IP列表，已保留旧数据。", count: 0 };
-    }
-    
+    // 对合并后的IP列表进行去重
     const uniqueIpsMap = new Map();
-    newIps.forEach(ipInfo => {
-        if (!uniqueIpsMap.has(ipInfo.ip)) {
-            uniqueIpsMap.set(ipInfo.ip, ipInfo);
+    allFetchedIps.forEach(ipInfo => {
+        // 确保ipInfo有效，且有IP地址字段
+        if (ipInfo && typeof ipInfo.ip === 'string' && ipInfo.ip.length > 0) {
+            // 使用IP地址作为唯一键进行去重
+            if (!uniqueIpsMap.has(ipInfo.ip)) {
+                uniqueIpsMap.set(ipInfo.ip, ipInfo);
+            }
+        } else {
+            console.warn("发现无效或空的IP项，已跳过:", ipInfo); // 记录无效IP项
         }
     });
     const uniqueNewIps = Array.from(uniqueIpsMap.values());
+    console.log(`从所有成功 API 获取到 ${allFetchedIps.length} 个IP，去重后剩余 ${uniqueNewIps.length} 个。`);
+
+    // 如果去重后没有剩余IP，也应该视为没有成功获取到有效IP
+    if (uniqueNewIps.length === 0) {
+        console.warn("所有API获取的IP在去重后均为空或无效。不执行数据库更新以保留现有数据。");
+        return { success: true, message: "所有API获取的IP在去重后均为空或无效，已保留旧数据。", count: 0, details: apiFetchStatusMessages.join(' | ') };
+    }
 
     try {
-        console.log(`总共获取了 ${newIps.length} 个IP，去重后剩余 ${uniqueNewIps.length} 个。准备清空并插入 D1...`);
-        
+        console.log(`准备清空并插入 ${uniqueNewIps.length} 个IP到 D1...`);
+
+        // 使用 D1 的 batch 事务处理清空和插入操作
         const statements = [
             db.prepare('DELETE FROM cfips'), // 清空旧数据
             ...uniqueNewIps.map(ipInfo =>
@@ -199,8 +257,8 @@ async function fetchAndStoreIps(env) {
         ];
 
         await db.batch(statements);
-        console.log(`成功从API获取并存储了 ${uniqueNewIps.length} 个IP。`);
-        return { success: true, message: `成功从主/备接口获取并存储了 ${uniqueNewIps.length} 个IP。`, count: uniqueNewIps.length };
+        console.log(`成功存储了 ${uniqueNewIps.length} 个IP到D1。`);
+        return { success: true, message: `成功从多个接口获取并存储了 ${uniqueNewIps.length} 个优选IP。详情: ${apiFetchStatusMessages.join(' | ')}`, count: uniqueNewIps.length };
     } catch (dbError) {
         console.error("IP存储到D1过程中发生错误:", dbError.message);
         return { success: false, error: `数据库操作失败: ${dbError.message}` };
@@ -213,8 +271,8 @@ async function fetchIpsFromDB(ipType, carrierType, env) {
     if (!db) {
         throw new Error("D1 数据库未绑定或不可用。");
     }
-  
-    let query = 'SELECT ip, ip_type, carrier FROM cfips WHERE 1=1'; 
+
+    let query = 'SELECT ip, ip_type, carrier FROM cfips WHERE 1=1';
     const params = [];
 
     if (ipType.toLowerCase() !== 'all') {
@@ -229,7 +287,7 @@ async function fetchIpsFromDB(ipType, carrierType, env) {
 
     try {
         const { results } = await db.prepare(query).bind(...params).all();
-        return results; 
+        return results;
     } catch (e) {
         console.error("从D1获取IP时出错:", e.message);
         throw new Error("数据库查询失败: " + e.message);
@@ -350,7 +408,7 @@ function replaceIpsInConfigs(baseConfigsToProcess, ipList) {
                 if (tempVmessObj.remark) {
                     delete tempVmessObj.remark;
                 }
-              
+
                 try {
                     generatedConfigs.push(`vmess://${utf8_to_b64(JSON.stringify(tempVmessObj))}`);
                 } catch (e) {
@@ -393,12 +451,12 @@ async function generateConfigs(request, env) {
         }
 
         const generatedConfigs = replaceIpsInConfigs(baseConfigsToProcess, ipList);
-      
+
         const successCount = generatedConfigs.filter(c => !c.startsWith('[错误]')).length;
         const errorCount = generatedConfigs.length - successCount;
         let message = `生成完成！成功 ${successCount} 条`
         if(errorCount > 0){
-            message += `，失败 ${errorCount} 条。`
+            message += `, 失败 ${errorCount} 条。`
         } else {
             message += `。`
         }
@@ -413,7 +471,7 @@ async function handleGetBatchConfigs(uuid, ipType, carrier, env) {
     if (!uuid) {
         return jsonResponse({ error: 'UUID 参数为必填项。' }, 400);
     }
-  
+
     const baseConfigs = await fetchConfigsByUuidFromDB(uuid, env);
     if (baseConfigs.length === 0) {
         return jsonResponse({ error: `未找到 UUID 为 "${uuid}" 的基础配置。` }, 404);
@@ -426,7 +484,7 @@ async function handleGetBatchConfigs(uuid, ipType, carrier, env) {
         console.error("Error fetching IPs for batch config:", e);
         return jsonResponse({ error: "获取IP列表失败: " + e.message }, 500);
     }
-  
+
     if (ipsData.length === 0) {
         return jsonResponse({ error: `未找到符合 IP 类型 "${ipType}" 和运营商 "${carrier}" 的IP地址。` }, 404);
     }
@@ -511,14 +569,14 @@ async function handleAddConfig(request, env) {
             continue;
         }
         const remark = extractRemarkFromConfig(line, protocol);
-      
+
         statements.push(
             env.DB.prepare(
                 'INSERT INTO configs (uuid, config_data, protocol, remark, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(uuid, config_data) DO NOTHING;'
             ).bind(uuid, line, protocol, remark, Date.now(), Date.now())
         );
     }
-  
+
     if (statements.length === 0) {
         return jsonResponse({ error: `提交的所有 ${invalidCount} 行均为无效格式。` }, 400);
     }
@@ -526,7 +584,7 @@ async function handleAddConfig(request, env) {
     try {
         const results = await env.DB.batch(statements);
         const newInserts = results.reduce((acc, res) => acc + (res.changes || 0), 0);
-      
+
         let message = `成功处理 ${statements.length} 条有效配置。`;
         if (newInserts > 0) {
             message += ` 新增 ${newInserts} 条。`;
@@ -538,7 +596,7 @@ async function handleAddConfig(request, env) {
         if (invalidCount > 0) {
             message += ` 另有 ${invalidCount} 条无效行被忽略。`;
         }
-      
+
         return jsonResponse({ success: true, message: message }, 200);
 
     } catch (e) {
@@ -620,7 +678,7 @@ export default {
         const manageConfigByIdMatch = manageConfigByIdPattern.exec(url);
         const batchConfigsMatch = batchConfigsPattern.exec(url);
 
-        try { 
+        try {
             if (method === 'GET') {
                 if (path === '/') {
                     const pageHtml = generatePageHtmlContent.replace(/YOUR_WORKER_DOMAIN_PATH/g, DOMAIN_NAME);
@@ -647,23 +705,33 @@ export default {
             if (path === '/fetch-ips' && method === 'GET') {
                 const ipType = url.searchParams.get('ipType') || 'all';
                 const carrierType = url.searchParams.get('carrierType') || 'all';
-                const ipSource = url.searchParams.get('source') || 'database'; 
+                const ipSource = url.searchParams.get('source') || 'database';
 
                 try {
+                    // 修复：将 apiResult 的声明提升到 try 块的顶部
+                    let apiResult = null;
+
                     if (ipSource === 'api') {
-                        const apiResult = await fetchAndStoreIps(env); // 调用带有容灾逻辑的函数
+                        // 用户从前端手动触发 API 更新时调用 fetchAndStoreIps
+                        apiResult = await fetchAndStoreIps(env); // 直接赋值，而不是用 const 重新声明
                         if (!apiResult.success) {
                             console.warn(`用户触发的API更新失败: ${apiResult.error}`);
-                            // 不抛出错误，而是返回一个指示错误的jsonResponse，以便前端可以显示信息
-                            return jsonResponse({ error: `API更新失败: ${apiResult.error}`, message: apiResult.message }, 500);
+                            // 返回带有详细错误的jsonResponse，以便前端可以显示信息
+                            // 使用 200 状态码，因为这是成功响应了请求，只是操作结果是失败
+                            return jsonResponse({ error: apiResult.error, message: apiResult.message || apiResult.error, details: apiResult.details || '' }, 200);
                         }
                     }
+                    // 无论是否从API更新，最终都是从DB获取并返回
                     const ips = await fetchIpsFromDB(ipType, carrierType, env);
                     const responseData = { ips: ips.map(row => row.ip) };
                     if (ips.length === 0) {
                         responseData.message = "数据库中没有找到符合条件的 IP 地址。请尝试更新IP或检查定时任务。";
                     } else {
                         responseData.message = `成功从数据库获取 ${ips.length} 个IP。`;
+                    }
+                    // 现在 apiResult 变量在这个作用域是可见的
+                    if (ipSource === 'api' && apiResult && apiResult.message) {
+                        responseData.message = `${apiResult.message} ${responseData.message}`;
                     }
                     return jsonResponse(responseData);
                 } catch (e) {
@@ -690,7 +758,7 @@ export default {
                         return jsonResponse({ error: `此路径不支持 ${method} 方法。` }, 405);
                 }
             }
-          
+
             return new Response('404 Not Found', { status: 404 });
         } catch (err) {
             console.error("Caught a fatal error in the fetch handler:", err.stack);
@@ -890,7 +958,7 @@ const generatePageHtmlContent = `
     <div class="content-group">
       <h1 class="profile-name">CF优选配置批量生成</h1>
       <p class="profile-quote">一个用于批量替换代理配置中IP地址的小工具</p>
-      
+
       <div class="nav-grid">
         <a href="/" class="nav-btn primary">批量生成</a>
         <a href="/manage" class="nav-btn">配置管理</a>
@@ -910,7 +978,7 @@ const generatePageHtmlContent = `
             <div class="info-box">在 <a href="/manage" target="_blank">配置管理</a> 页面添加和管理UUID。</div>
         </div>
       </div>
-      
+
       <div class="card">
         <h2>2. 优选IP列表</h2>
         <div class="form-group">
@@ -937,9 +1005,9 @@ const generatePageHtmlContent = `
                 <label><input type="radio" name="genIpSource" value="api"><span>从接口更新</span></label>
             </div>
         </div>
-    
+
         <button id="genFetchIpButton" class="nav-btn" style="width:100%; margin-bottom: 16px;" onclick="genFetchAndPopulateIps()">获取优选IP</button>
-        
+
         <div id="ipSubscriptionLinkBox" class="config-link-box hidden">
             <strong>IP 订阅链接:</strong> <a id="ipSubscriptionLink" href="#" target="_blank"></a>
             <button class="nav-btn" onclick="copyIpSubscriptionLink()">复制</button>
@@ -956,7 +1024,7 @@ const generatePageHtmlContent = `
         </div>
         <textarea id="genResultTextarea" readonly placeholder="点击下方“生成配置”按钮..." rows="8"></textarea>
       </div>
-      
+
       <button id="genGenerateButton" class="nav-btn primary" style="width:100%; padding: 12px;" onclick="genGenerateConfigs()">生成配置</button>
       <button id="copyResultButton" class="nav-btn" style="width:100%; margin-top: 10px;" onclick="copyResults()">复制结果 (Base64)</button>
 
@@ -1019,12 +1087,16 @@ const generatePageHtmlContent = `
         try {
             const response = await fetch(\`/fetch-ips?ipType=\${ipType}&carrierType=\${carrierType}&source=\${source}\`);
             const data = await response.json();
-            if (!response.ok) throw new Error(data.error || '服务器错误');
-            if (data.ips && data.ips.length > 0) {
+            if (response.status !== 200) { // 如果服务端返回非200状态码，视为API请求失败
+                throw new Error(data.error || '服务器错误');
+            }
+            if (data.error) { // 如果JSON响应中包含error字段，即使状态码200也视为操作失败
+                showToast('获取IP失败: ' + data.error, 'error');
+            } else if (data.ips && data.ips.length > 0) {
                 ipListInput.value = data.ips.join('\\n');
-                showToast(\`成功获取 \${data.ips.length} 个IP！\`, 'success');
+                showToast(\`\${data.message || '成功获取IP！'}\`, 'success');
             } else {
-                showToast(data.message || '未找到符合条件的IP。', 'info');
+                showToast(\`\${data.message || '未找到符合条件的IP。'}\`, 'info');
             }
         } catch (error) {
             showToast('获取IP失败: ' + error.message, 'error');
@@ -1135,7 +1207,7 @@ const managePageHtmlContent = `
     <div class="content-group">
       <h1 class="profile-name">基础配置管理器</h1>
       <p class="profile-quote">在这里添加、查询和删除用于批量生成的基础配置</p>
-      
+
       <div class="nav-grid">
         <a href="/" class="nav-btn">批量生成</a>
         <a href="/manage" class="nav-btn primary">配置管理</a>
