@@ -43,9 +43,14 @@
    *   系统统计：实时查看域名、IP、UUID 数量统计
 
 ### 7. **安全特性**
-   *   JWT 认证系统，保障管理后台安全
-   *   响应式设计，适配桌面和移动设备
-   *   配置生成器外部链接跳转功能，提供一站式配置管理体验
+*   JWT 认证系统，保障管理后台安全
+*   **MFA双重验证**：
+    - 支持TOTP(基于时间的一次性密码)验证
+    - 管理员可启用/禁用MFA
+    - 提供10个一次性备份码，防止验证器丢失
+    - 支持使用备份码登录
+*   响应式设计，适配桌面和移动设备
+*   配置生成器外部链接跳转功能，提供一站式配置管理体验
 
 ## 🛠️ 部署准备
 
@@ -102,6 +107,25 @@ CREATE TABLE IF NOT EXISTS auto_update_settings (
     source TEXT UNIQUE NOT NULL,
     enabled INTEGER DEFAULT 1,
     updated_at INTEGER DEFAULT (unixepoch())
+);
+
+-- MFA 密钥表 (v1.4新增)
+CREATE TABLE IF NOT EXISTS mfa_secrets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    secret TEXT NOT NULL,
+    created_at INTEGER DEFAULT (unixepoch()),
+    FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
+);
+
+-- MFA 备份码表 (v1.4新增)
+CREATE TABLE IF NOT EXISTS mfa_backup_codes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    code TEXT NOT NULL,
+    used INTEGER DEFAULT 0,
+    created_at INTEGER DEFAULT (unixepoch()),
+    FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE
 );
 
 -- 初始化管理员 (账号: admin / 密码: password)
@@ -241,7 +265,17 @@ sequenceDiagram
 | `POST` | `/update-ips`          | 手动更新IP池             | -        |
 | `GET`  | `/uuids`               | 获取UUID列表             | -        |
 | `GET`  | `/api/settings/auto-update` | 获取自动更新设置     | -        |
-| `POST` | `/api/settings/auto-update` | 更新自动更新设置     | JSON body |
+| `POST` | `/api/settings/auto-update` |  update auto-update settings     | JSON body |
+
+### MFA相关接口：
+| 方法   | 路径                              | 描述                     |
+|--------|-----------------------------------|--------------------------|
+| `POST` | `/api/mfa/init`                   | 初始化MFA，获取密钥和二维码 |
+| `POST` | `/api/mfa/verify-first`           | 首次验证MFA并启用        |
+| `POST` | `/api/mfa/login-with-backup`      | 使用备份码登录           |
+| `GET`  | `/api/mfa/status`                 | 获取MFA状态              |
+| `POST` | `/api/mfa/disable`                | 禁用MFA                  |
+| `POST` | `/api/mfa/backup-codes/regenerate`| 重新生成备份码           |
 
 ### 自动更新设置接口说明
 - **获取自动更新设置** (`GET /api/settings/auto-update`): 
