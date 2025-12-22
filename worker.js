@@ -1,14 +1,13 @@
 /* =================================================================
- *  Cloudflare Worker: All-in-One Proxy Tool (IP & Domain Optimization)
- *  Provides functionalities:
- *  1. /                  - Batch Generator (Supports IPs & Domains).
- *  2. /manage            - Redirects to External Config Manager.
- *  3. /batch-ip          - Direct Address fetching (IPs or Domains).
- *  4. /batch-configs     - Subscription link based on DB UUID.
+ * Cloudflare Worker: All-in-One Proxy Tool (Strict Read-Only Version)
+ * =================================================================
+ * [SECURITY NOTE]: 
+ * This version allows NO IP updates (Auto or Manual).
+ * It ONLY reads existing data from the D1 Database.
  * ================================================================= */
 
 // =================================================================
-//  GLOBAL UTILITIES (Shared by all functionalities)
+//  GLOBAL UTILITIES
 // =================================================================
 
 function utf8_to_b64(str) {
@@ -48,165 +47,10 @@ function getProtocol(configStr) {
 
 
 // =================================================================
-//  SECTION 1: Data Fetching (IPs & Domains)
+//  SECTION 1: Data Fetching (STRICTLY READ ONLY)
 // =================================================================
 
-async function fetchIpsFromHostMonit() {
-    const apiUrl = 'https://api.hostmonit.com/get_optimization_ip';
-    console.log("正在从主 API (api.hostmonit.com) 获取优选IP...");
-
-    const response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'referer': 'https://stock.hostmonit.com/',
-            'origin': 'https://stock.hostmonit.com',
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
-            'accept': 'application/json, text/plain, */*'
-        },
-        body: JSON.stringify({ key: "iDetkOys" })
-    });
-
-    if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`主API请求失败: ${response.status} - ${errorText.substring(0, 200)}`);
-    }
-
-    const data = await response.json();
-
-    if (data.code === 200 && data.info && Array.isArray(data.info)) {
-        const ips = [];
-        data.info.forEach(item => {
-            if (item.ip && item.line) {
-                const isV6 = item.ip.includes(':');
-                ips.push({
-                    ip: isV6 ? `[${item.ip}]` : item.ip,
-                    ip_type: isV6 ? 'v6' : 'v4',
-                    carrier: item.line,
-                });
-            }
-        });
-        return ips;
-    } else {
-        throw new Error(`主API响应格式不正确。`);
-    }
-}
-
-async function fetchIpsFromVps789() {
-    const apiUrl = 'https://vps789.com/openApi/cfIpApi';
-    console.log("正在从备用 API (vps789.com) 获取优选IP...");
-
-    const response = await fetch(apiUrl, {
-        method: 'GET',
-        headers: {
-            'User-Agent': 'Cloudflare-Worker-Proxy-Tool/4.0',
-            'Accept': 'application/json'
-        }
-    });
-
-    if (!response.ok) {
-        throw new Error(`备用API请求失败: ${response.status}`);
-    }
-
-    const data = await response.json();
-
-    if (data.code === 0 && data.message === "true" && data.data) {
-        const ips = [];
-        const carrierGroups = data.data;
-
-        for (const carrierKey in carrierGroups) {
-            if (Object.prototype.hasOwnProperty.call(carrierGroups, carrierKey)) {
-                const ipListForCarrier = carrierGroups[carrierKey];
-                let currentCarrier;
-
-                switch (carrierKey.toUpperCase()) {
-                    case 'CT': currentCarrier = 'CT'; break;
-                    case 'CU': currentCarrier = 'CU'; break;
-                    case 'CM': currentCarrier = 'CM'; break;
-                    case 'ALLAVG': currentCarrier = 'ALL'; break;
-                    default: continue;
-                }
-
-                if (Array.isArray(ipListForCarrier)) {
-                    ipListForCarrier.forEach(item => {
-                        if (item.ip && typeof item.ip === 'string') {
-                            const isV6 = item.ip.includes(':');
-                            ips.push({
-                                ip: isV6 ? `[${item.ip}]` : item.ip,
-                                ip_type: isV6 ? 'v6' : 'v4',
-                                carrier: currentCarrier,
-                            });
-                        }
-                    });
-                }
-            }
-        }
-        return ips;
-    } else {
-        throw new Error(`备用API响应格式不正确。`);
-    }
-}
-
-async function fetchAndStoreIps(env) {
-    let allFetchedIps = [];
-    let apiFetchStatusMessages = [];
-    let hasSuccessfulFetch = false;
-
-    const results = await Promise.allSettled([
-        fetchIpsFromHostMonit(),
-        fetchIpsFromVps789()
-    ]);
-
-    results.forEach((result, index) => {
-        const apiName = index === 0 ? '主API' : '备用API';
-        if (result.status === 'fulfilled') {
-            allFetchedIps.push(...result.value);
-            apiFetchStatusMessages.push(`${apiName} 获取 ${result.value.length} 个`);
-            hasSuccessfulFetch = true;
-        } else {
-            apiFetchStatusMessages.push(`${apiName} 失败`);
-        }
-    });
-
-    if (!hasSuccessfulFetch) {
-        return { success: false, error: `所有IP API均失败。详情: ${apiFetchStatusMessages.join('; ')}` };
-    }
-
-    const db = env.DB;
-    if (!db) return { success: false, error: "D1 数据库未绑定。" };
-
-    const uniqueIpsMap = new Map();
-    allFetchedIps.forEach(ipInfo => {
-        if (ipInfo && typeof ipInfo.ip === 'string' && ipInfo.ip.length > 0) {
-            if (!uniqueIpsMap.has(ipInfo.ip)) {
-                uniqueIpsMap.set(ipInfo.ip, ipInfo);
-            }
-        }
-    });
-    const uniqueNewIps = Array.from(uniqueIpsMap.values());
-
-    if (uniqueNewIps.length === 0) {
-        return { success: true, message: "无有效IP，保留旧数据。", count: 0 };
-    }
-
-    try {
-        const statements = [
-            db.prepare('DELETE FROM cfips'),
-            ...uniqueNewIps.map(ipInfo =>
-                db.prepare('INSERT INTO cfips (ip, ip_type, carrier, created_at) VALUES (?, ?, ?, ?)')
-                .bind(ipInfo.ip, ipInfo.ip_type, ipInfo.carrier, Date.now())
-            )
-        ];
-
-        await db.batch(statements);
-        return { success: true, message: `成功存储 ${uniqueNewIps.length} 个IP。详情: ${apiFetchStatusMessages.join(' | ')}`, count: uniqueNewIps.length };
-    } catch (dbError) {
-        console.error("D1 Error:", dbError.message);
-        return { success: false, error: `数据库操作失败: ${dbError.message}` };
-    }
-}
-
-// 获取 IP
+// 获取 IP (仅读取 SELECT)
 async function fetchIpsFromDB(ipType, carrierType, env) {
     const db = env.DB;
     if (!db) throw new Error("D1 数据库未绑定。");
@@ -228,7 +72,7 @@ async function fetchIpsFromDB(ipType, carrierType, env) {
     return results;
 }
 
-// 获取域名
+// 获取域名 (仅读取 SELECT)
 async function fetchDomainsFromDB(env) {
     const db = env.DB;
     if (!db) throw new Error("D1 数据库未绑定。");
@@ -241,16 +85,15 @@ async function fetchDomainsFromDB(env) {
     }
 }
 
-// 统一的批量获取接口 (IP 或 域名)
+// 统一的批量获取接口
 async function handleGetBatchAddresses(url, env) {
-    const type = url.searchParams.get('type') || 'ip'; // 'ip' or 'domain'
+    const type = url.searchParams.get('type') || 'ip'; 
 
     try {
-        let results = [];
         if (type === 'domain') {
             const domainData = await fetchDomainsFromDB(env);
             if (domainData.length === 0) {
-                return new Response("Database is empty (no domains found in cf_domains).", { status: 404 });
+                return new Response("Database is empty (no domains found).", { status: 404 });
             }
             const listText = domainData.map(item => item.domain).join('\n');
             return new Response(listText, { headers: { 'Content-Type': 'text/plain;charset=UTF-8' } });
@@ -261,7 +104,7 @@ async function handleGetBatchAddresses(url, env) {
             const ipData = await fetchIpsFromDB(ipType, carrier, env);
             
             if (ipData.length === 0) {
-                return new Response(`No IPs found for ipType=${ipType} and carrier=${carrier}.`, { status: 404 });
+                return new Response(`No IPs found in DB for ipType=${ipType} and carrier=${carrier}.`, { status: 404 });
             }
             const listText = ipData.map(item => item.ip).join('\n');
             return new Response(listText, { headers: { 'Content-Type': 'text/plain;charset=UTF-8' } });
@@ -278,7 +121,7 @@ async function handleGetBatchAddresses(url, env) {
 //  SECTION 2: Config Generation Logic
 // =================================================================
 
-// 内部函数：保留读取功能，以便生成逻辑工作（如果数据库中有其他工具写入的数据）
+// 读取基础配置 (SELECT)
 async function fetchConfigsByUuidFromDB(uuid, env) {
     const db = env.DB;
     if (!db) return [];
@@ -329,7 +172,6 @@ function replaceAddressesInConfigs(baseConfigsToProcess, addressList) {
         }
 
         for (const newAddr of addressList) {
-            // let hostOnly = newAddr.includes(':') && !newAddr.includes('[') ? newAddr.split(':')[0] : newAddr;
             if (!validAddressRegex.test(newAddr) && !newAddr.includes(':')) {
                 // simple validation
             }
@@ -344,7 +186,7 @@ function replaceAddressesInConfigs(baseConfigsToProcess, addressList) {
                     url.hostname = newAddr; 
                     generatedConfigs.push(url.toString());
                 } catch (e) {
-                     pushError(`处理 ${configType} 出错: ${e.message}`);
+                      pushError(`处理 ${configType} 出错: ${e.message}`);
                 }
             } else if (configType === 'vmess') {
                 const tempVmessObj = JSON.parse(JSON.stringify(processedBaseConfig));
@@ -406,7 +248,6 @@ async function generateConfigs(request, env) {
 }
 
 // 订阅链接生成配置 (GET)
-// urlParams: type (ip/domain), ipType, carrier
 async function handleGetBatchConfigs(uuid, urlParams, env) {
     if (!uuid) return jsonResponse({ error: 'UUID Required' }, 400);
 
@@ -464,7 +305,6 @@ export default {
         const path = url.pathname;
         const method = request.method;
         const DOMAIN_NAME = url.origin;
-        // 外部配置管理地址
         const EXTERNAL_CONFIG_MANAGER_URL = "https://config-cfst.api.yangzifun.org/";
 
         const batchUUID = new URLPattern({ pathname: '/batch-configs/:uuid' });
@@ -475,35 +315,30 @@ export default {
                     return new Response(generatePageHtmlContent.replace(/YOUR_WORKER_DOMAIN_PATH/g, DOMAIN_NAME), { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
                 }
                 
-                // 重定向配置管理页面
+                // Redirect to Manager (External)
                 if (path === '/manage') {
                     return Response.redirect(EXTERNAL_CONFIG_MANAGER_URL, 302);
                 }
 
-                // 获取 IP/域名 列表文本 (原始接口)
+                // API: Get List Text
                 if (path === '/batch-ip') {
                     return await handleGetBatchAddresses(url, env);
                 }
 
-                // 订阅地址 (通过 UUID 生成配置)
+                // API: Subscription
                 const batchMatch = batchUUID.exec(url);
                 if (batchMatch) {
                     return await handleGetBatchConfigs(batchMatch.pathname.groups.uuid, url.searchParams, env);
                 }
 
-                // 前端专用获取接口 (返回JSON)
+                // API: Frontend Fetch (Strictly DB)
                 if (path === '/fetch-addresses') {
                     const type = url.searchParams.get('type') || 'ip';
                     if (type === 'domain') {
                         const domains = await fetchDomainsFromDB(env);
                         return jsonResponse({ list: domains.map(d => d.domain), message: `获取到 ${domains.length} 个域名` });
                     } else {
-                        // IP 逻辑
-                        const ipSource = url.searchParams.get('source') || 'database';
-                        if (ipSource === 'api') {
-                            const res = await fetchAndStoreIps(env);
-                            if(!res.success) return jsonResponse({ error: res.error }, 200);
-                        }
+                        // IP Logic: Force DB read, ignore any 'source=api' params
                         const ips = await fetchIpsFromDB(
                             url.searchParams.get('ipType') || 'all',
                             url.searchParams.get('carrierType') || 'all',
@@ -512,17 +347,14 @@ export default {
                         return jsonResponse({ list: ips.map(i => i.ip), message: `获取到 ${ips.length} 个IP` }); 
                     }
                 }
-                // 兼容旧接口
+                // Legacy API
                 if (path === '/fetch-ips') {
-                     const ipSource = url.searchParams.get('source') || 'database';
-                     if (ipSource === 'api') await fetchAndStoreIps(env);
                      const ips = await fetchIpsFromDB(url.searchParams.get('ipType') || 'all', url.searchParams.get('carrierType') || 'all', env);
                      return jsonResponse({ ips: ips.map(i => i.ip), message: `Success` });
                 }
             }
 
             if (method === 'POST') {
-                // 仅保留生成配置的接口
                 if (path === '/generate') return generateConfigs(request, env);
             }
 
@@ -531,14 +363,13 @@ export default {
             return new Response("Internal Error: " + err.message, { status: 500 });
         }
     },
-
-    async scheduled(controller, env, ctx) {
-        ctx.waitUntil(fetchAndStoreIps(env));
-    }
+    
+    // [SECURITY] No scheduled() function is exported here.
+    // This prevents Cloudflare from triggering any automatic Cron Triggers.
 };
 
 // =================================================================
-//  SECTION 4: FRONTEND CONTENT (UNIFIED UI STYLE AND LINK BOX)
+//  SECTION 4: FRONTEND CONTENT
 // =================================================================
 
 const newGlobalStyle = `
@@ -549,7 +380,6 @@ body, html { margin: 0; padding: 0; min-height: 100%; background-color: #fff; fo
 .profile-name { font-size: 2.2rem; color: #3d474d; margin-bottom: 10px; font-weight: bold;}
 .profile-quote { color: #89949B; margin-bottom: 27px; min-height: 1.2em; }
 .nav-grid { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-bottom: 27px; }
-/* Unified nav-btn style (compatible with A tags) */
 .nav-btn { display: inline-flex; align-items: center; justify-content: center; padding: 8px 16px; text-align: center; background: #E8EBED; border: 2px solid #89949B; border-radius: 4px; color: #5a666d; text-decoration: none !important; font-weight: 500; font-size: 0.95rem; line-height: 1.2; transition: all 0.3s; white-space: nowrap; cursor: pointer; box-sizing: border-box; }
 .nav-btn:hover:not(:disabled) { background: #89949B; color: white; }
 .nav-btn:disabled { opacity: 0.6; cursor: not-allowed;}
@@ -590,7 +420,7 @@ const generatePageHtmlContent = `
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="icon" href="https://s3.yangzifun.org/logo.ico" type="image/x-icon">
-  <title>YZFN 优选配置生成 (Pro)</title>
+  <title>YZFN 优选配置生成 (Read-Only)</title>
   <style>${newGlobalStyle}</style>
 </head>
 <body>
@@ -598,7 +428,7 @@ const generatePageHtmlContent = `
   <div class="container">
     <div class="content-group">
       <h1 class="profile-name">CF优选配置批量生成</h1>
-      <p class="profile-quote">支持 IP 优选与域名优选的批量替换工具</p>
+      <p class="profile-quote">支持 IP 优选与域名优选的批量替换工具 (Database Mode)</p>
 
       <div class="nav-grid">
         <a href="/" class="nav-btn primary">批量生成</a>
@@ -648,13 +478,6 @@ const generatePageHtmlContent = `
                 <label><input type="radio" name="genCarrierType" value="CT"><span>电信</span></label>
               </div>
             </div>
-             <div class="form-group">
-                <label>数据来源</label>
-                <div class="radio-group">
-                    <label><input type="radio" name="genIpSource" value="database" checked><span>从本地数据库</span></label>
-                    <label><input type="radio" name="genIpSource" value="api"><span>从远程API更新</span></label>
-                </div>
-            </div>
         </div>
 
         <div id="domainInfoBox" class="info-box hidden">
@@ -663,7 +486,6 @@ const generatePageHtmlContent = `
 
         <button id="genFetchBtn" class="nav-btn" style="width:100%; margin-bottom: 16px;" onclick="genFetchAddresses()">获取优选列表</button>
         
-        <!-- Modified Link Display: Using Input for Unified Style -->
         <div id="ipSubscriptionLinkBox" class="form-group hidden" style="display:none; gap:10px;">
             <input type="text" id="ipSubscriptionLink" readonly style="margin-bottom:0; color:#5a666d; background-color: #f8f9fa;">
             <button class="nav-btn" onclick="copyIpSubscriptionLink()" style="white-space: nowrap;">复制</button>
@@ -674,7 +496,6 @@ const generatePageHtmlContent = `
 
       <div class="card">
         <h2>3. 生成结果</h2>
-        <!-- Modified Link Display: Using Input for Unified Style -->
         <div id="generatedLinkBox" class="form-group hidden" style="display:none; gap:10px;">
            <label style="align-self:center; white-space:nowrap; margin-bottom:0; margin-right:5px;">订阅:</label>
            <input type="text" id="generatedConfigLink" readonly style="margin-bottom:0; color:#5a666d; background-color: #f8f9fa;">
@@ -711,127 +532,152 @@ const generatePageHtmlContent = `
         }
     }
 
-    function toggleGenConfigSource() {
-        const isManual = document.querySelector('input[name="genConfigSource"]:checked').value === 'manual';
-        document.getElementById('genManualConfigInput').classList.toggle('hidden', !isManual);
-        document.getElementById('genUuidConfigInput').classList.toggle('hidden', isManual);
-        document.getElementById('generatedLinkBox').style.display = 'none';
-        document.getElementById('generatedLinkBox').classList.add('hidden');
-    }
+    // Tab switching for Config Source
+    const sourceRadios = document.querySelectorAll('input[name="genConfigSource"]');
+    sourceRadios.forEach(r => r.addEventListener('change', (e) => {
+        if(e.target.value === 'uuid') {
+            document.getElementById('genManualConfigInput').classList.add('hidden');
+            document.getElementById('genUuidConfigInput').classList.remove('hidden');
+        } else {
+            document.getElementById('genManualConfigInput').classList.remove('hidden');
+            document.getElementById('genUuidConfigInput').classList.add('hidden');
+        }
+    }));
 
     async function genFetchAddresses() {
         const btn = document.getElementById('genFetchBtn');
-        const orgTxt = btn.innerHTML;
-        setButtonLoading(btn, true, orgTxt);
-        const listInput = document.getElementById('genAddressListInput');
+        const textarea = document.getElementById('genAddressListInput');
         const subBox = document.getElementById('ipSubscriptionLinkBox');
-        const subLinkInput = document.getElementById('ipSubscriptionLink');
+        const subInput = document.getElementById('ipSubscriptionLink');
         
-        listInput.value = '';
+        // Reset sub box
         subBox.style.display = 'none';
         subBox.classList.add('hidden');
 
-        const addrType = document.querySelector('input[name="genAddressType"]:checked').value;
+        setButtonLoading(btn, true, '');
         
-        let subUrl = \`\${WORKER_DOMAIN}/batch-ip?type=\${addrType}\`;
-        let fetchUrl = \`/fetch-addresses?type=\${addrType}\`;
-
-        if (addrType === 'ip') {
-             const ipType = document.querySelector('input[name="genIpType"]:checked').value;
-             const carrier = document.querySelector('input[name="genCarrierType"]:checked').value;
-             const src = document.querySelector('input[name="genIpSource"]:checked').value;
-             subUrl += \`&ipType=\${encodeURIComponent(ipType)}&carrier=\${encodeURIComponent(carrier)}\`;
-             fetchUrl += \`&ipType=\${encodeURIComponent(ipType)}&carrierType=\${encodeURIComponent(carrier)}&source=\${src}\`;
-        }
-        
-        // Changed to utilize Input value instead of href
-        subLinkInput.value = subUrl;
-        subBox.style.display = 'flex';
-        subBox.classList.remove('hidden');
-
         try {
-            const res = await fetch(fetchUrl);
-            const data = await res.json();
-            if(data.error) throw new Error(data.error);
-            if(data.list && data.list.length > 0) {
-                listInput.value = data.list.join('\\n');
-                showToast(data.message || \`获取到 \${data.list.length} 条数据\`, 'success');
+            const addrType = document.querySelector('input[name="genAddressType"]:checked').value;
+            let url = \`\${WORKER_DOMAIN}/fetch-addresses?type=\${addrType}\`;
+            
+            if (addrType === 'ip') {
+                const ipType = document.querySelector('input[name="genIpType"]:checked').value;
+                const carrier = document.querySelector('input[name="genCarrierType"]:checked').value;
+                url += \`&ipType=\${ipType}&carrierType=\${carrier}&source=database\`; // Always database
+                
+                // Show subscription link logic
+                const subUrl = \`\${WORKER_DOMAIN}/batch-ip?type=ip&ipType=\${ipType}&carrier=\${carrier}\`;
+                subInput.value = subUrl;
+                subBox.style.display = 'flex';
+                subBox.classList.remove('hidden');
+
             } else {
-                showToast('未找到数据', 'info');
+                // Domain subscription link
+                 const subUrl = \`\${WORKER_DOMAIN}/batch-ip?type=domain\`;
+                 subInput.value = subUrl;
+                 subBox.style.display = 'flex';
+                 subBox.classList.remove('hidden');
             }
-        } catch(e) { showToast(e.message, 'error'); }
-        finally { setButtonLoading(btn, false, orgTxt); }
+
+            const res = await fetch(url);
+            const data = await res.json();
+            
+            if (data.error) throw new Error(data.error);
+            
+            if (data.list && Array.isArray(data.list)) {
+                textarea.value = data.list.join('\\n');
+                showToast(data.message || \`获取成功: \${data.list.length} 条\`, 'success');
+            } else {
+                throw new Error("返回数据格式错误");
+            }
+        } catch (e) {
+            showToast(e.message, 'error');
+            textarea.value = "";
+        } finally {
+            setButtonLoading(btn, false, '获取优选列表');
+        }
     }
 
     async function genGenerateConfigs() {
         const btn = document.getElementById('genGenerateButton');
-        const orgTxt = btn.innerHTML;
-        setButtonLoading(btn, true, orgTxt);
-        const resArea = document.getElementById('genResultTextarea');
-        const genLinkBox = document.getElementById('generatedLinkBox');
-        const genLinkInput = document.getElementById('generatedConfigLink');
-        
-        resArea.value = '';
-        genLinkBox.style.display = 'none';
-        genLinkBox.classList.add('hidden');
+        const resultArea = document.getElementById('genResultTextarea');
+        const linkBox = document.getElementById('generatedLinkBox');
+        const linkInput = document.getElementById('generatedConfigLink');
 
-        const source = document.querySelector('input[name="genConfigSource"]:checked').value;
-        const addrType = document.querySelector('input[name="genAddressType"]:checked').value;
-        const addressList = document.getElementById('genAddressListInput').value;
+        // Reset
+        linkBox.style.display = 'none';
+        linkBox.classList.add('hidden');
 
-        const body = { addressList };
-        let uuid = '';
-
-        if(source === 'manual') body.baseConfig = document.getElementById('genBaseConfigInput').value;
-        else {
-             uuid = document.getElementById('genBaseConfigUuidInput').value.trim();
-             body.baseConfigUuid = uuid;
-        }
-
-        if ((!body.baseConfig && !body.baseConfigUuid) || !body.addressList) {
-            showToast('参数不完整', 'error'); setButtonLoading(btn, false, orgTxt); return;
-        }
+        setButtonLoading(btn, true, '');
 
         try {
-            const res = await fetch('/generate', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
-            const data = await res.json();
-            if(data.error) throw new Error(data.error);
+            const configSource = document.querySelector('input[name="genConfigSource"]:checked').value;
+            const addressList = document.getElementById('genAddressListInput').value;
+            
+            let payload = { addressList };
 
-            resArea.value = data.configs.join('\\n');
-            const validCount = data.configs.filter(c=>!c.startsWith('[错误]')).length;
-            showToast(\`成功生成 \${validCount} 条\`, 'success');
-
-            if(source === 'uuid' && uuid && validCount > 0) {
-                let linkUrl = \`\${WORKER_DOMAIN}/batch-configs/\${uuid}?type=\${addrType}\`;
+            if (configSource === 'uuid') {
+                const uuid = document.getElementById('genBaseConfigUuidInput').value.trim();
+                if(!uuid) throw new Error("请输入 UUID");
+                payload.baseConfigUuid = uuid;
+                
+                // Construct subscription link for UUID mode
+                const addrType = document.querySelector('input[name="genAddressType"]:checked').value;
+                let linkParams = \`type=\${addrType}\`;
                 if(addrType === 'ip') {
                     const ipType = document.querySelector('input[name="genIpType"]:checked').value;
                     const carrier = document.querySelector('input[name="genCarrierType"]:checked').value;
-                    linkUrl += \`&ipType=\${encodeURIComponent(ipType)}&carrier=\${encodeURIComponent(carrier)}\`;
+                    linkParams += \`&ipType=\${ipType}&carrier=\${carrier}\`;
                 }
-                // Changed to utilize Input value
-                genLinkInput.value = linkUrl;
-                genLinkBox.style.display = 'flex';
-                genLinkBox.classList.remove('hidden');
+                const subLink = \`\${WORKER_DOMAIN}/batch-configs/\${uuid}?\${linkParams}\`;
+                linkInput.value = subLink;
+                linkBox.style.display = 'flex';
+                linkBox.classList.remove('hidden');
+
+            } else {
+                const manualConfig = document.getElementById('genBaseConfigInput').value.trim();
+                if(!manualConfig) throw new Error("请输入基础配置");
+                payload.baseConfig = manualConfig;
             }
-        } catch(e) { showToast(e.message, 'error'); resArea.value = '错误:\\n' + e.message; }
-        finally { setButtonLoading(btn, false, orgTxt); }
+
+            const res = await fetch(\`\${WORKER_DOMAIN}/generate\`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const data = await res.json();
+
+            if (data.error) throw new Error(data.error);
+
+            if (data.configs && Array.isArray(data.configs)) {
+                resultArea.value = data.configs.join('\\n');
+                showToast(data.message || "生成成功", 'success');
+            }
+        } catch (e) {
+            showToast(e.message, 'error');
+        } finally {
+            setButtonLoading(btn, false, '生成配置');
+        }
     }
 
     function copyResults() {
-        const v = document.getElementById('genResultTextarea').value;
-        if(!v) return;
-        const c = v.split('\\n').filter(l => !l.startsWith('[错误]')).join('\\n');
-        navigator.clipboard.writeText(btoa(c)).then(()=>showToast('已复制Base64', 'success'), ()=>showToast('复制失败','error'));
+        const content = document.getElementById('genResultTextarea').value;
+        if (!content) return showToast('没有可复制的内容', 'error');
+        const b64 = btoa(unescape(encodeURIComponent(content))); // utf-8 safe b64
+        navigator.clipboard.writeText(b64).then(() => showToast('已复制 Base64 编码结果', 'success'));
     }
-    // Updated copy functions for Inputs
-    function copyGeneratedLink() { navigator.clipboard.writeText(document.getElementById('generatedConfigLink').value).then(()=>showToast('链接已复制','success')); }
-    function copyIpSubscriptionLink() { navigator.clipboard.writeText(document.getElementById('ipSubscriptionLink').value).then(()=>showToast('链接已复制','success')); }
+    
+    function copyGeneratedLink() {
+        const link = document.getElementById('generatedConfigLink').value;
+        if(!link) return;
+        navigator.clipboard.writeText(link).then(() => showToast('订阅链接已复制', 'success'));
+    }
 
-    document.addEventListener('DOMContentLoaded', () => {
-        document.querySelectorAll('input[name="genConfigSource"]').forEach(r => r.addEventListener('change', toggleGenConfigSource));
-        toggleGenConfigSource();
-        toggleAddressOptions();
-    });
+    function copyIpSubscriptionLink() {
+        const link = document.getElementById('ipSubscriptionLink').value;
+        if(!link) return;
+        navigator.clipboard.writeText(link).then(() => showToast('列表地址已复制', 'success'));
+    }
   </script>
 </body>
 </html>

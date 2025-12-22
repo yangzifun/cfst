@@ -1,35 +1,51 @@
+# Cloudflare Worker: 代理配置优选工具
 
+这是一个运行在 Cloudflare Worker 上的多功能代理工具，结合 Cloudflare D1 数据库，提供**IP优选**和**域名优选**的批量替换功能。系统由3个文件组成：**worker.js** - 优选生成器、**config_worker.js** - 配置管理器、**mg_worker.js** - 管理后台。采用三 Worker 架构，分别处理优选生成、配置管理和系统管理，实现功能解耦和独立部署。
 
-# Cloudflare Worker: 代理配置优选工具 (All-in-One Proxy Tool)
+## 📦 系统组成
 
-这是一个运行在 Cloudflare Worker 上的多功能代理工具，结合 Cloudflare D1 数据库，提供**IP优选**和**域名优选**的批量替换功能。它集成了现代化的前端 UI，支持基础配置管理、自动获取优选 IP 以及生成包含优选地址的订阅链接。
+**系统由3个核心文件组成**：
+- **`worker.js`** - 优选生成器：处理 IP/域名优选、订阅生成、批量配置替换
+- **`config_worker.js`** - 配置管理器：提供配置 CRUD 操作、订阅接口、配置编辑功能
+- **`mg_worker.js`** - 管理后台：JWT 认证、域名/IP/UUID 管理、系统统计、手动 IP 更新
 
 ## ✨ 主要特性
 
-1.  **双 Worker 架构**：
-    ```mermaid
-    graph LR
-    A[用户浏览器] --> B(worker.js)
-    A --> C(config_worker.js)
-    B --> D[(Cloudflare D1)]
-    C --> D
-    ```
-    *   `worker.js` - 主业务逻辑/订阅生成
-    *   `config_worker.js` - 专用配置管理接口
-    *   通过共享 D1 数据库实现数据同步
-2.  **双模式优选**：支持将配置中的地址批量替换为 **优选 IP** 或 **优选域名**。
-3.  **自动化 IP 更新**：
-    *   集成 `hostmonit.com` 和 `vps789.com` API。
-    *   支持通过 Cron 定时任务自动拉取并缓存最新优选 IP 到 D1 数据库。
-3.  **配置管理 (CRUD)**：
-    *   提供 `/manage` 界面，可添加、查询、删除基础配置（支持 VMess, VLESS, Trojan）。
-    *   按 UUID 分组管理，方便生成不同的订阅。
-4.  **动态订阅生成**：
-    *   提供类似于 `/batch-configs/{uuid}` 的订阅接口。
-    *   支持通过 URL 参数动态指定 IP 类型（IPv4/IPv6）或运营商（电信/联通/移动）。
-5.  **现代化 UI**：
-    *   内置两个独立的 HTML 页面（生成器首页与管理页）。
-    *   适配移动端，包含 Toast 提示和加载动画。
+### 1. **三 Worker 架构**
+该系统由3个文件组成：**worker.js** - 优选生成器、**config_worker.js** - 配置管理器、**mg_worker.js** - 管理后台。
+
+   *   **worker.js** - 优选生成器：处理 IP/域名优选、订阅生成、批量配置替换
+   *   **config_worker.js** - 配置管理器：提供配置 CRUD 操作、订阅接口、配置编辑功能，包含外部配置生成器链接
+   *   **mg_worker.js** - 管理后台：JWT 认证、域名/IP/UUID 管理、系统统计、手动 IP 更新
+
+### 2. **双模式优选**
+   *   支持将配置中的地址批量替换为 **优选 IP** 或 **优选域名**
+   *   支持 IPv4/IPv6 和不同运营商（电信/联通/移动）筛选
+   *   支持通过管理后台手动更新 IP 数据源
+
+### 4. **配置管理 (CRUD) [v1.2]**
+   *   提供完整的管理界面，可添加、查询、编辑、删除基础配置（支持 VMess, VLESS, Trojan）
+   *   按 UUID 分组管理，方便生成不同的订阅
+   *   支持配置编辑功能，可修改别名、地址、端口、传输协议等参数
+   *   提供配置生成器外部链接（"配置生成"按钮），链接到外部配置生成器（https://cfst.api.yangzifun.org）
+   *   改进的订阅链接显示方式（使用可复制的输入框）
+   *   统一的前端按钮样式
+
+### 5. **动态订阅生成**
+   *   提供 `/sub/{uuid}` 订阅接口，返回 Base64 编码的配置列表
+   *   支持通过 URL 参数动态指定 IP 类型（IPv4/IPv6）或运营商（电信/联通/移动）
+   *   支持批量添加配置，提高管理效率
+
+### 6. **完整的数据管理**
+   *   域名管理：添加、编辑、删除优选域名
+   *   IP 资源池管理：查看、删除、刷新优选 IP
+   *   UUID 分组管理：按 UUID 管理配置分组
+   *   系统统计：实时查看域名、IP、UUID 数量统计
+
+### 7. **安全特性**
+   *   JWT 认证系统，保障管理后台安全
+   *   响应式设计，适配桌面和移动设备
+   *   配置生成器外部链接跳转功能，提供一站式配置管理体验
 
 ## 🛠️ 部署准备
 
@@ -52,61 +68,77 @@
  *  D1 数据库建表 Schema
  * ================================================================= */
 
--- 1. configs 表：存储用户管理的基础配置 (VMess/VLESS/Trojan)
-CREATE TABLE IF NOT EXISTS configs (
+-- 用户表
+CREATE TABLE IF NOT EXISTS admin_users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    uuid TEXT NOT NULL,
-    config_data TEXT NOT NULL,
-    protocol TEXT,
-    remark TEXT,
-    created_at INTEGER,
-    updated_at INTEGER,
-    UNIQUE (uuid, config_data)
+    username TEXT UNIQUE,
+    password_hash TEXT
 );
-
--- 2. cfips 表：存储从 API 抓取并缓存的 Cloudflare 优选 IP
-CREATE TABLE IF NOT EXISTS cfips (
-    ip TEXT PRIMARY KEY,
-    ip_type TEXT NOT NULL, -- 'v4' or 'v6'
-    carrier TEXT NOT NULL, -- 'CM', 'CU', 'CT', 'ALL'
-    created_at INTEGER NOT NULL
-);
-
--- 3. cf_domains 表：存储优选域名列表
+-- 域名表
 CREATE TABLE IF NOT EXISTS cf_domains (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    domain TEXT UNIQUE NOT NULL,
+    domain TEXT UNIQUE,
     remark TEXT,
     created_at INTEGER
 );
+-- UUID 配置表
+CREATE TABLE IF NOT EXISTS configs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid TEXT,
+    config TEXT, 
+    created_at INTEGER
+);
+-- IP 池表
+CREATE TABLE IF NOT EXISTS cfips (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ip TEXT UNIQUE,
+    ip_type TEXT,
+    carrier TEXT,
+    created_at INTEGER
+);
+-- 自动更新设置表 (v1.3新增)
+CREATE TABLE IF NOT EXISTS auto_update_settings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT UNIQUE NOT NULL,
+    enabled INTEGER DEFAULT 1,
+    updated_at INTEGER DEFAULT (unixepoch())
+);
 
--- (可选) 初始化插入一些示例优选域名
--- 请替换为您自己收集的高质量优选域名
-INSERT INTO cf_domains (domain, remark, created_at) VALUES 
-('www.visa.com.sg', '示例域名1', 1716300000),
-('www.csgo.com', '示例域名2', 1716300000),
-('time.is', '示例域名3', 1716300000);
+-- 初始化管理员 (账号: admin / 密码: password)
+-- Hash 值是 "password" 的 SHA-256
+INSERT INTO admin_users (username, password_hash) VALUES ('admin', '5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8');
+
+-- 初始化自动更新设置 (v1.3新增)
+INSERT OR IGNORE INTO auto_update_settings (source, enabled) VALUES 
+('global', 1),
+('hostmonit', 1),
+('vps789', 1);
 ```
 
-### 3. 创建双 Worker 并绑定 D1
+### 3. 创建Worker并绑定D1
 
-1.  **创建主 Worker**：
-    *   新建 Standard Worker 命名为 `proxy-main`
-    *   将 `worker.js` 代码复制到编辑器
-    *   绑定 D1 数据库：变量名 `DB` → 选择创建的数据库
+创建三个Worker并绑定到同一个D1数据库：
 
-2.  **创建配置管理 Worker**：
-    *   新建 Standard Worker 命名为 `proxy-config`
-    *   将 `config_worker.js` 代码复制到编辑器
-    *   绑定 **同一个** D1 数据库：变量名 `DB`
+| Worker名称      | 绑定文件       | 数据库绑定变量 |
+|-----------------|---------------|---------------|
+| `proxy-main`    | `worker.js`   | `DB`          |
+| `proxy-config`  | `config_worker.js` | `DB`      |
+| `proxy-mg`      | `mg_worker.js`| `DB`          |
 
-3.  **路由配置**：
-    *   在 DNS 设置中创建两条路由：
+绑定步骤：
+1. 每个Worker的"Settings" → "Variables"中添加D1绑定
+2. **Variable name** 必须设置为 `DB`（区分大小写）
+3. 选择前面创建的D1数据库
+
+4.  **路由配置**：
+    *   在 DNS 设置中创建三条路由：
     ```
     proxy.example.com/* → proxy-main
     config.example.com/* → proxy-config
+    mg.example.com/* → proxy-mg
     ```
-3.  **重要配置**：进入 Worker 的 **Settings** -> **Variables**：
+
+5.  **重要配置**：进入每个 Worker 的 **Settings** -> **Variables**：
     *   **D1 Database Bindings**：
     *   **Variable name**: `DB` (必须完全一致，注意大写)
     *   **D1 database**: 选择第 1 步创建的数据库。
@@ -125,15 +157,6 @@ INSERT INTO cf_domains (domain, remark) VALUES
 ('cdn.example.net', 'CDN加速域名');
 ```
 
-### 5. 设置定时任务 (Cron Triggers)
-
-为了让 Worker 自动从外部接口更新优选 IP 数据，请配置 Cron 触发器：
-
-1.  进入 Worker 的 **Settings** -> **Triggers**。
-2.  点击 **Add Cron Trigger**。
-3.  设置频率，例如每 4 小时一次：`0 */4 * * *`。
-    *   *注意：代码中的 `scheduled` 事件会处理 IP 更新逻辑。*
-
 ### 5. 部署上线
 
 点击 "Deploy" 保存并发布 Worker。访问 Worker 的 URL 即可看到操作界面。
@@ -147,7 +170,7 @@ INSERT INTO cf_domains (domain, remark) VALUES
     *   **手动粘贴**：直接将 vmess/vless 链接粘贴到文本框。
     *   **从 UUID 获取**：输入在管理页保存的 UUID，脚本会自动拉取该组所有配置。
 *   **优选列表**：
-    *   **IP 地址**：选择 IPv4/IPv6 或特定运营商。建议先点击“从远程 API 更新”以填充数据库。
+    *   **IP 地址**：选择 IPv4/IPv6 或特定运营商。如果IP池为空，请点击"从远程API更新"按钮手动获取IP。
     *   **优选域名**：直接使用数据库 `cf_domains` 表中的域名。
 *   **生成配置**：点击按钮，底部文本框将显示替换后的节点列表。
 
@@ -155,6 +178,7 @@ INSERT INTO cf_domains (domain, remark) VALUES
 *   在此页面，您可以：
     *   **管理基础配置**：添加/查询/删除节点配置
     *   **管理优选域名**：添加/编辑/删除优选域名（v1.2+）
+    *   **管理自动更新设置**：配置IP池自动更新策略（v1.3+）
 *   **操作指南**：
     1. 在"配置管理"标签页：
         - **添加配置**：输入UUID和VMess/VLESS链接
@@ -200,43 +224,39 @@ sequenceDiagram
 |---------------|----------------|--------------------|------------------|
 | `worker.js`   | `config_worker.js` | `/config`        | 拉取基础配置     |
 | `worker.js`   | `config_worker.js` | `/domain`        | 获取优选域名     |
-| 前端页面      | `config_worker.js` | `/manage` 相关接口 | 配置管理操作     |
-| 定时任务      | `worker.js`       | `/fetch-ips`     | 触发IP更新       |
+| 用户浏览器    | `mg_worker.js` | `/manage` 相关接口 | 管理后台操作     |
+| 用户浏览器    | `mg_worker.js` | `/update-ips`     | 手动更新IP       |
 
 ## 📡 API 接口文档
 
-### worker.js 接口：
-| 方法   | 路径                   | 描述                     |
-| :----- | :--------------------- | :----------------------- |
-| `GET`  | `/`                    | 优选生成器 UI            |
-| `GET`  | `/batch-ip`            | 获取纯文本 IP/域名列表   |
-| `GET`  | `/batch-configs/:uuid` | 获取 Base64 订阅配置     |
-| `GET`  | `/fetch-addresses`     | (JSON) 获取地址列表数据  |
-| `GET`  | `/fetch-ips`           | (旧版兼容) 触发 API 更新 |
-| `POST` | `/generate`            | 核心生成接口             |
-| `GET`  | `/healthcheck`         | 服务健康检查             |
+### mg_worker.js 接口：
+| 方法   | 路径                   | 描述                     | 参数示例 |
+| :----- | :--------------------- | :----------------------- | :------- |
+| `GET`  | `/manage`              | 管理后台UI               | -        |
+| `POST` | `/login`               | 管理员登录               | JSON body |
+| `GET`  | `/domains`             | 获取域名列表             | -        |
+| `POST` | `/domain`              | 添加域名                 | JSON body |
+| `DELETE`| `/domain/:id`         | 删除域名                 | URL参数  |
+| `GET`  | `/ips`                 | 获取IP列表               | `?page=1&per_page=20` |
+| `POST` | `/update-ips`          | 手动更新IP池             | -        |
+| `GET`  | `/uuids`               | 获取UUID列表             | -        |
+| `GET`  | `/api/settings/auto-update` | 获取自动更新设置     | -        |
+| `POST` | `/api/settings/auto-update` | 更新自动更新设置     | JSON body |
 
-### config_worker.js 接口：
-| 方法   | 路径          | 描述               |
-| :----- | :------------ | :----------------- |
-| `GET`  | `/manage`     | 配置管理器 UI      |
-| `POST` | `/config`     | 添加/更新配置      |
-| `GET`  | `/config`     | 查询配置           |
-| `DELETE`| `/config`    | 删除配置           |
-| `POST` | `/domain`     | 添加/更新域名      |
-| `GET`  | `/domain`     | 查询域名列表       |
-| `DELETE`| `/domain/:id`| 删除域名           |
-
-| 方法   | 路径                   | 描述                     | 参数示例                                                    |
-| :----- | :--------------------- | :----------------------- | :---------------------------------------------------------- |
-| `GET`  | `/`                    | 优选生成器 UI            | -                                                           |
-| `GET`  | `/manage`              | 配置管理器 UI            | -                                                           |
-| `GET`  | `/batch-ip`            | 获取纯文本 IP/域名列表   | `?type=ip` 或 `?type=domain`<br>`?ipType=v4&carrier=CM`     |
-| `GET`  | `/batch-configs/:uuid` | 获取 Base64 订阅配置     | `?type=domain` (使用域名)<br>`?type=ip&carrier=CU` (使用IP) |
-| `GET`  | `/fetch-addresses`     | (JSON) 获取地址列表数据  | `?type=domain`                                              |
-| `GET`  | `/fetch-ips`           | (旧版兼容) 触发 API 更新 | `?source=api` (强制触发更新)                                |
-| `POST` | `/generate`            | 核心生成接口             | Body: `{ baseConfig: "...", addressList: "..." }`           |
-| `GET`  | `/healthcheck`         | 服务健康检查             | -                                                           |
+### 自动更新设置接口说明
+- **获取自动更新设置** (`GET /api/settings/auto-update`): 
+  返回当前自动更新配置，包括每个数据源（global, hostmonit, vps789）的启用状态
+- **更新自动更新设置** (`POST /api/settings/auto-update`): 
+  更新自动更新配置。请求体为JSON格式，示例：
+  ```json
+  { 
+    "source": "hostmonit", 
+    "enabled": true 
+  }
+  ```
+  支持更新的字段：
+  - `source`: 数据源名称 (global/hostmonit/vps789)
+  - `enabled`: 启用状态 (true/false)
 
 ---
 
@@ -245,21 +265,11 @@ sequenceDiagram
 1.  **文件分工**：
     *   `worker.js` 处理优选逻辑和订阅生成
     *   `config_worker.js` 专注配置管理 CRUD 操作
-2.  **首次使用**：数据库中的 IP 表默认为空。请在首页选择“IP 获取来源 -> 从接口更新”，点击“获取优选 IP”按钮，或者等待第一次 Cron 任务执行，数据库才会有数据。
+2.  **IP 更新**：
+    *   系统默认开启自动更新IP池，可在管理后台配置
+    *   支持全局开关和按接口源单独配置
 3.  **域名管理**：
     *   通过 SQL 命令维护 `cf_domains` 表：`INSERT INTO cf_domains (domain, remark) VALUES ('example.com', '优质域名')`
     *   支持在配置管理页(`/manage`)直接管理域名（v1.2+新功能）
 4.  **VMess 格式**：代码仅支持标准的 JSON 格式 Base64 编码的 VMess 链接。
 5.  **配置同步**：通过 `config_worker.js` 管理的配置会实时同步到 D1 数据库。
-6.  **版本更新**：最新变更请查看 [更新日志](#更新日志)
-
-## 📌 更新日志
-
-### v1.2 (2025-12-22)
-- 新增：配置管理页支持域名CRUD操作
-- 优化：IP更新API响应超时处理
-- 修复：移动端UI适配问题
-
-### v1.1 (2025-12-15)
-- 新增：IPv6优选支持
-- 新增：运营商级IP筛选(电信/联通/移动)
