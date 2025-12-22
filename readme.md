@@ -1,4 +1,4 @@
----
+
 
 # Cloudflare Worker: 代理配置优选工具 (All-in-One Proxy Tool)
 
@@ -6,8 +6,19 @@
 
 ## ✨ 主要特性
 
-1.  **双模式优选**：支持将配置中的地址批量替换为 **优选 IP** 或 **优选域名**。
-2.  **自动化 IP 更新**：
+1.  **双 Worker 架构**：
+    ```mermaid
+    graph LR
+    A[用户浏览器] --> B(worker.js)
+    A --> C(config_worker.js)
+    B --> D[(Cloudflare D1)]
+    C --> D
+    ```
+    *   `worker.js` - 主业务逻辑/订阅生成
+    *   `config_worker.js` - 专用配置管理接口
+    *   通过共享 D1 数据库实现数据同步
+2.  **双模式优选**：支持将配置中的地址批量替换为 **优选 IP** 或 **优选域名**。
+3.  **自动化 IP 更新**：
     *   集成 `hostmonit.com` 和 `vps789.com` API。
     *   支持通过 Cron 定时任务自动拉取并缓存最新优选 IP 到 D1 数据库。
 3.  **配置管理 (CRUD)**：
@@ -77,15 +88,44 @@ INSERT INTO cf_domains (domain, remark, created_at) VALUES
 ('time.is', '示例域名3', 1716300000);
 ```
 
-### 3. 创建 Worker 并绑定 D1
+### 3. 创建双 Worker 并绑定 D1
 
-1.  创建一个新的 Standard Worker。
-2.  将提供的 `worker.js` 代码完整复制到 Worker 编辑器中。
-3.  **重要配置**：进入 Worker 的 **Settings** -> **Variables** -> **D1 Database Bindings**。
+1.  **创建主 Worker**：
+    *   新建 Standard Worker 命名为 `proxy-main`
+    *   将 `worker.js` 代码复制到编辑器
+    *   绑定 D1 数据库：变量名 `DB` → 选择创建的数据库
+
+2.  **创建配置管理 Worker**：
+    *   新建 Standard Worker 命名为 `proxy-config`
+    *   将 `config_worker.js` 代码复制到编辑器
+    *   绑定 **同一个** D1 数据库：变量名 `DB`
+
+3.  **路由配置**：
+    *   在 DNS 设置中创建两条路由：
+    ```
+    proxy.example.com/* → proxy-main
+    config.example.com/* → proxy-config
+    ```
+3.  **重要配置**：进入 Worker 的 **Settings** -> **Variables**：
+    *   **D1 Database Bindings**：
     *   **Variable name**: `DB` (必须完全一致，注意大写)
     *   **D1 database**: 选择第 1 步创建的数据库。
 
-### 4. 设置定时任务 (Cron Triggers)
+### 4. 初始化域名表 (可选)
+在配置管理页(`/manage`)上线后，您可以直接在UI中添加域名：
+1. 访问Worker地址 + `/manage`
+2. 切换到"域名管理"标签页
+3. 点击"添加域名"按钮
+4. 输入域名和备注信息
+
+或者通过SQL初始化：
+```sql
+INSERT INTO cf_domains (domain, remark) VALUES 
+('example.com', '优质域名'),
+('cdn.example.net', 'CDN加速域名');
+```
+
+### 5. 设置定时任务 (Cron Triggers)
 
 为了让 Worker 自动从外部接口更新优选 IP 数据，请配置 Cron 触发器：
 
@@ -112,9 +152,18 @@ INSERT INTO cf_domains (domain, remark, created_at) VALUES
 *   **生成配置**：点击按钮，底部文本框将显示替换后的节点列表。
 
 ### 2. 配置管理页 (`/manage`)
-*   在此页面，您可以将基础的节点配置（未优选的）存入数据库。
-*   **添加**：输入一个自定义的 UUID（例如 `my-tv-box`）和配置链接。
-*   **查询/删除**：管理已保存的配置。保存后，可以在首页通过 UUID 直接调用。
+*   在此页面，您可以：
+    *   **管理基础配置**：添加/查询/删除节点配置
+    *   **管理优选域名**：添加/编辑/删除优选域名（v1.2+）
+*   **操作指南**：
+    1. 在"配置管理"标签页：
+        - **添加配置**：输入UUID和VMess/VLESS链接
+        - **查询配置**：按UUID筛选配置
+        - **删除配置**：点击配置项右侧删除按钮
+    2. 在"域名管理"标签页：
+        - **添加域名**：输入域名和备注信息
+        - **编辑域名**：点击域名项修改信息
+        - **删除域名**：点击域名项右侧删除按钮
 
 ### 3. 订阅链接
 生成配置后，如果使用了 UUID 模式，系统会提供一个永久订阅链接，格式如下：
@@ -123,9 +172,60 @@ INSERT INTO cf_domains (domain, remark, created_at) VALUES
 
 ---
 
+## ⚙️ 系统架构
+
+### 组件交互流程
+```mermaid
+sequenceDiagram
+    participant User as 用户浏览器
+    participant Main as worker.js
+    participant Config as config_worker.js
+    participant DB as D1 数据库
+
+    User->>Config: 访问 /manage (配置管理)
+    Config->>DB: 读写配置数据
+    Config-->>User: 返回管理界面
+
+    User->>Main: 访问 / (生成器首页)
+    Main->>DB: 读取优选IP/域名
+    Main-->>User: 返回生成器界面
+
+    User->>Main: 提交生成请求
+    Main->>DB: 获取基础配置
+    Main-->>User: 返回优选节点
+```
+
+### 接口调用关系
+| 调用方        | 被调用方       | 接口路径           | 数据流向         |
+|---------------|----------------|--------------------|------------------|
+| `worker.js`   | `config_worker.js` | `/config`        | 拉取基础配置     |
+| `worker.js`   | `config_worker.js` | `/domain`        | 获取优选域名     |
+| 前端页面      | `config_worker.js` | `/manage` 相关接口 | 配置管理操作     |
+| 定时任务      | `worker.js`       | `/fetch-ips`     | 触发IP更新       |
+
 ## 📡 API 接口文档
 
-Worker 提供以下 API 供外部工具调用：
+### worker.js 接口：
+| 方法   | 路径                   | 描述                     |
+| :----- | :--------------------- | :----------------------- |
+| `GET`  | `/`                    | 优选生成器 UI            |
+| `GET`  | `/batch-ip`            | 获取纯文本 IP/域名列表   |
+| `GET`  | `/batch-configs/:uuid` | 获取 Base64 订阅配置     |
+| `GET`  | `/fetch-addresses`     | (JSON) 获取地址列表数据  |
+| `GET`  | `/fetch-ips`           | (旧版兼容) 触发 API 更新 |
+| `POST` | `/generate`            | 核心生成接口             |
+| `GET`  | `/healthcheck`         | 服务健康检查             |
+
+### config_worker.js 接口：
+| 方法   | 路径          | 描述               |
+| :----- | :------------ | :----------------- |
+| `GET`  | `/manage`     | 配置管理器 UI      |
+| `POST` | `/config`     | 添加/更新配置      |
+| `GET`  | `/config`     | 查询配置           |
+| `DELETE`| `/config`    | 删除配置           |
+| `POST` | `/domain`     | 添加/更新域名      |
+| `GET`  | `/domain`     | 查询域名列表       |
+| `DELETE`| `/domain/:id`| 删除域名           |
 
 | 方法   | 路径                   | 描述                     | 参数示例                                                    |
 | :----- | :--------------------- | :----------------------- | :---------------------------------------------------------- |
@@ -136,11 +236,30 @@ Worker 提供以下 API 供外部工具调用：
 | `GET`  | `/fetch-addresses`     | (JSON) 获取地址列表数据  | `?type=domain`                                              |
 | `GET`  | `/fetch-ips`           | (旧版兼容) 触发 API 更新 | `?source=api` (强制触发更新)                                |
 | `POST` | `/generate`            | 核心生成接口             | Body: `{ baseConfig: "...", addressList: "..." }`           |
+| `GET`  | `/healthcheck`         | 服务健康检查             | -                                                           |
 
 ---
 
 ## ⚠️ 注意事项
 
-1.  **首次使用**：数据库中的 IP 表默认为空。请在首页选择“IP 获取来源 -> 从接口更新”，点击“获取优选 IP”按钮，或者等待第一次 Cron 任务执行，数据库才会有数据。
-2.  **域名表**：优选域名需要您手动通过 SQL 语句维护（插入/删除 `cf_domains` 表），代码目前不提供自动抓取域名的功能，因为优质域名通常需要手动筛选。
-3.  **VMess 格式**：代码仅支持标准的 JSON 格式 Base64 编码的 VMess 链接。
+1.  **文件分工**：
+    *   `worker.js` 处理优选逻辑和订阅生成
+    *   `config_worker.js` 专注配置管理 CRUD 操作
+2.  **首次使用**：数据库中的 IP 表默认为空。请在首页选择“IP 获取来源 -> 从接口更新”，点击“获取优选 IP”按钮，或者等待第一次 Cron 任务执行，数据库才会有数据。
+3.  **域名管理**：
+    *   通过 SQL 命令维护 `cf_domains` 表：`INSERT INTO cf_domains (domain, remark) VALUES ('example.com', '优质域名')`
+    *   支持在配置管理页(`/manage`)直接管理域名（v1.2+新功能）
+4.  **VMess 格式**：代码仅支持标准的 JSON 格式 Base64 编码的 VMess 链接。
+5.  **配置同步**：通过 `config_worker.js` 管理的配置会实时同步到 D1 数据库。
+6.  **版本更新**：最新变更请查看 [更新日志](#更新日志)
+
+## 📌 更新日志
+
+### v1.2 (2025-12-22)
+- 新增：配置管理页支持域名CRUD操作
+- 优化：IP更新API响应超时处理
+- 修复：移动端UI适配问题
+
+### v1.1 (2025-12-15)
+- 新增：IPv6优选支持
+- 新增：运营商级IP筛选(电信/联通/移动)

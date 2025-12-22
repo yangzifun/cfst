@@ -1,21 +1,16 @@
 /* =================================================================
  *  Cloudflare Worker: All-in-One Proxy Tool (IP & Domain Optimization)
- *  Provides three functionalities:
+ *  Provides functionalities:
  *  1. /                  - Batch Generator (Supports IPs & Domains).
- *  2. /manage            - Base Configuration Management.
+ *  2. /manage            - Redirects to External Config Manager.
  *  3. /batch-ip          - Direct Address fetching (IPs or Domains).
- *
- *  Shared D1 bindings:
- *  - 'DB' for 'configs' table (user proxy configs)
- *  - 'DB' for 'cfips' table (cached IP addresses)
- *  - 'DB' for 'cf_domains' table (optimization domains)
+ *  4. /batch-configs     - Subscription link based on DB UUID.
  * ================================================================= */
 
 // =================================================================
 //  GLOBAL UTILITIES (Shared by all functionalities)
 // =================================================================
 
-// Base64 UTILS for VMess
 function utf8_to_b64(str) {
     return btoa(encodeURIComponent(str).replace(/%([0-9A-F]{2})/g,
         function toSolidBytes(match, p1) {
@@ -56,9 +51,6 @@ function getProtocol(configStr) {
 //  SECTION 1: Data Fetching (IPs & Domains)
 // =================================================================
 
-/**
- * 从 hostmonit.com API 获取IP。
- */
 async function fetchIpsFromHostMonit() {
     const apiUrl = 'https://api.hostmonit.com/get_optimization_ip';
     console.log("正在从主 API (api.hostmonit.com) 获取优选IP...");
@@ -100,9 +92,6 @@ async function fetchIpsFromHostMonit() {
     }
 }
 
-/**
- * 从 vps789.com API 获取IP。
- */
 async function fetchIpsFromVps789() {
     const apiUrl = 'https://vps789.com/openApi/cfIpApi';
     console.log("正在从备用 API (vps789.com) 获取优选IP...");
@@ -158,9 +147,6 @@ async function fetchIpsFromVps789() {
     }
 }
 
-/**
- * 同时从两个API获取IP，合并并去重，然后存储到D1。
- */
 async function fetchAndStoreIps(env) {
     let allFetchedIps = [];
     let apiFetchStatusMessages = [];
@@ -242,11 +228,10 @@ async function fetchIpsFromDB(ipType, carrierType, env) {
     return results;
 }
 
-// [新增] 获取域名
+// 获取域名
 async function fetchDomainsFromDB(env) {
     const db = env.DB;
     if (!db) throw new Error("D1 数据库未绑定。");
-    // 对 cf_domains 表查询，请确保已建表
     try {
         const { results } = await db.prepare('SELECT domain FROM cf_domains ORDER BY created_at DESC').all();
         return results;
@@ -293,6 +278,7 @@ async function handleGetBatchAddresses(url, env) {
 //  SECTION 2: Config Generation Logic
 // =================================================================
 
+// 内部函数：保留读取功能，以便生成逻辑工作（如果数据库中有其他工具写入的数据）
 async function fetchConfigsByUuidFromDB(uuid, env) {
     const db = env.DB;
     if (!db) return [];
@@ -306,13 +292,10 @@ async function fetchConfigsByUuidFromDB(uuid, env) {
     }
 }
 
-// 核心替换逻辑：支持 IP 和 域名
+// 核心替换逻辑
 function replaceAddressesInConfigs(baseConfigsToProcess, addressList) {
     let generatedConfigs = [];
-    // 用于提取原始地址 (IP或域名) 的正则
     const addressExtractionRegex = /@(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[[0-9a-fA-F:\.]+\]|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})(?::\d+)?(?:[\/?#]|$)/;
-
-    // 校验新地址是否合法的简单正则 (IP或域名)
     const validAddressRegex = /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[[0-9a-fA-F:\.]+\]|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})$/;
 
     for (const baseConfig of baseConfigsToProcess) {
@@ -320,7 +303,6 @@ function replaceAddressesInConfigs(baseConfigsToProcess, addressList) {
         let processedBaseConfig;
         const pushError = (msg) => generatedConfigs.push(`[错误] ${msg}`);
 
-        // 预处理配置并提取原始信息
         if (configType === 'trojan' || configType === 'vless') {
             const addressMatch = baseConfig.match(addressExtractionRegex);
             if (!addressMatch) {
@@ -346,18 +328,11 @@ function replaceAddressesInConfigs(baseConfigsToProcess, addressList) {
             continue;
         }
 
-        // 遍历所有新地址进行替换
         for (const newAddr of addressList) {
-            // 如果地址带端口 (e.g. domain.com:443)，分离出 host
-            let hostOnly = newAddr.includes(':') && !newAddr.includes('[') ? newAddr.split(':')[0] : newAddr;
-            
-            // IPv6特殊处理，如果是 [ffe::1]:443 这种格式暂时不做复杂分离，假设输入全是干净的 IP/Host
-            // 这里为了安全，简单校验一下格式
+            // let hostOnly = newAddr.includes(':') && !newAddr.includes('[') ? newAddr.split(':')[0] : newAddr;
             if (!validAddressRegex.test(newAddr) && !newAddr.includes(':')) {
-                 // 如果完全不符合格式暂不强行报错，防止误杀复杂域名，但建议前端过滤
+                // simple validation
             }
-
-            // 用于生成别名的地址字符串（去掉特殊字符）
             const cleanAddrForName = newAddr.replace(/[\[\]]/g, '');
 
             if (configType === 'trojan' || configType === 'vless') {
@@ -366,10 +341,7 @@ function replaceAddressesInConfigs(baseConfigsToProcess, addressList) {
                     const originalName = url.hash ? decodeURIComponent(url.hash.substring(1)) : `${configType}-node`;
                     const newName = `${originalName}-${cleanAddrForName}`;
                     url.hash = encodeURIComponent(newName);
-                    
-                    // 核心：替换 hostname (支持 IP 和 域名)
                     url.hostname = newAddr; 
-                    
                     generatedConfigs.push(url.toString());
                 } catch (e) {
                      pushError(`处理 ${configType} 出错: ${e.message}`);
@@ -378,7 +350,7 @@ function replaceAddressesInConfigs(baseConfigsToProcess, addressList) {
                 const tempVmessObj = JSON.parse(JSON.stringify(processedBaseConfig));
                 const originalName = tempVmessObj.ps || tempVmessObj.remark || 'vmess-node';
                 tempVmessObj.ps = `${originalName}-${cleanAddrForName}`;
-                tempVmessObj.add = newAddr; // 核心：替换地址
+                tempVmessObj.add = newAddr; 
                 if (tempVmessObj.remark) delete tempVmessObj.remark;
 
                 try {
@@ -392,11 +364,10 @@ function replaceAddressesInConfigs(baseConfigsToProcess, addressList) {
     return generatedConfigs;
 }
 
-// 手动或UUID生成配置 (POST)
+// 手动 or UUID 生成 (POST)
 async function generateConfigs(request, env) {
     try {
         const body = await request.json();
-        // 兼容旧参数 ipList，新参数统一叫 addressList
         const addressListText = body.addressList || body.ipList;
         const { baseConfigUuid, baseConfig: baseConfigFromRequest } = body;
         
@@ -420,8 +391,6 @@ async function generateConfigs(request, env) {
         }
 
         const addressList = addressListText.split('\n').map(a => a.trim()).filter(a => a.length > 0);
-        
-        // 使用新函数替换
         const generatedConfigs = replaceAddressesInConfigs(baseConfigsToProcess, addressList);
 
         const successCount = generatedConfigs.filter(c => !c.startsWith('[错误]')).length;
@@ -485,68 +454,6 @@ async function handleGetBatchConfigs(uuid, urlParams, env) {
     });
 }
 
-
-// =================================================================
-//  SECTION 3: Base Configuration Management Logic
-// =================================================================
-
-function extractRemarkFromConfig(configStr, protocol) {
-    try {
-        if (protocol === 'vmess') {
-            const decoded = b64_to_utf8(configStr.substring('vmess://'.length));
-            const vmessObj = JSON.parse(decoded);
-            return vmessObj.ps || vmessObj.remark || null;
-        }
-        if (protocol === 'vless' || protocol === 'trojan') {
-            const url = new URL(configStr);
-            if (url.hash) return decodeURIComponent(url.hash.substring(1));
-        }
-    } catch (e) { }
-    return null;
-}
-
-async function handleAddConfig(request, env) {
-    let body;
-    try { body = await request.json(); } catch (e) { return jsonResponse({ error: '无效 JSON' }, 400); }
-
-    const { uuid, config_data } = body;
-    if (!uuid || !config_data) return jsonResponse({ error: '字段缺失' }, 400);
-
-    const configLines = config_data.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-    const statements = [];
-
-    for (const line of configLines) {
-        const protocol = getProtocol(line);
-        if (protocol === 'unknown') continue;
-        const remark = extractRemarkFromConfig(line, protocol);
-        statements.push(
-            env.DB.prepare('INSERT INTO configs (uuid, config_data, protocol, remark, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(uuid, config_data) DO NOTHING;')
-            .bind(uuid, line, protocol, remark, Date.now(), Date.now())
-        );
-    }
-
-    if (statements.length === 0) return jsonResponse({ error: '无有效配置' }, 400);
-
-    await env.DB.batch(statements);
-    return jsonResponse({ success: true, message: `成功处理 ${statements.length} 条。` }, 200);
-}
-
-async function handleGetConfigsByUuid(uuid, env) {
-    const { results } = await env.DB.prepare('SELECT * FROM configs WHERE uuid = ? ORDER BY id ASC').bind(uuid).all();
-    if (results && results.length > 0) return jsonResponse({ uuid: uuid, configs: results }, 200);
-    return jsonResponse({ error: `Not Found` }, 404);
-}
-
-async function handleDeleteConfigsByUuid(uuid, env) {
-    await env.DB.prepare('DELETE FROM configs WHERE uuid = ?').bind(uuid).run();
-    return jsonResponse({ success: true, message: `Deleted` }, 200);
-}
-
-async function handleDeleteSingleConfig(id, env) {
-    await env.DB.prepare('DELETE FROM configs WHERE id = ?').bind(id).run();
-    return jsonResponse({ success: true, message: `Deleted` });
-}
-
 // =================================================================
 //  MAIN WORKER ROUTING AND EXPORT
 // =================================================================
@@ -557,9 +464,9 @@ export default {
         const path = url.pathname;
         const method = request.method;
         const DOMAIN_NAME = url.origin;
+        // 外部配置管理地址
+        const EXTERNAL_CONFIG_MANAGER_URL = "https://config-cfst.api.yangzifun.org/";
 
-        const manageUUID = new URLPattern({ pathname: '/manage/configs/:uuid' });
-        const manageID = new URLPattern({ pathname: '/manage/configs/id/:id' });
         const batchUUID = new URLPattern({ pathname: '/batch-configs/:uuid' });
 
         try {
@@ -567,18 +474,23 @@ export default {
                 if (path === '/') {
                     return new Response(generatePageHtmlContent.replace(/YOUR_WORKER_DOMAIN_PATH/g, DOMAIN_NAME), { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
                 }
+                
+                // 重定向配置管理页面
                 if (path === '/manage') {
-                    return new Response(managePageHtmlContent.replace(/YOUR_WORKER_DOMAIN_PATH/g, DOMAIN_NAME), { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
+                    return Response.redirect(EXTERNAL_CONFIG_MANAGER_URL, 302);
                 }
-                // 获取 IP/域名 列表文本
+
+                // 获取 IP/域名 列表文本 (原始接口)
                 if (path === '/batch-ip') {
                     return await handleGetBatchAddresses(url, env);
                 }
-                // 订阅地址
+
+                // 订阅地址 (通过 UUID 生成配置)
                 const batchMatch = batchUUID.exec(url);
                 if (batchMatch) {
                     return await handleGetBatchConfigs(batchMatch.pathname.groups.uuid, url.searchParams, env);
                 }
+
                 // 前端专用获取接口 (返回JSON)
                 if (path === '/fetch-addresses') {
                     const type = url.searchParams.get('type') || 'ip';
@@ -602,27 +514,16 @@ export default {
                 }
                 // 兼容旧接口
                 if (path === '/fetch-ips') {
-                    // Redirect logic internally
                      const ipSource = url.searchParams.get('source') || 'database';
                      if (ipSource === 'api') await fetchAndStoreIps(env);
                      const ips = await fetchIpsFromDB(url.searchParams.get('ipType') || 'all', url.searchParams.get('carrierType') || 'all', env);
                      return jsonResponse({ ips: ips.map(i => i.ip), message: `Success` });
                 }
-
-                const uuidMatch = manageUUID.exec(url);
-                if (uuidMatch) return await handleGetConfigsByUuid(uuidMatch.pathname.groups.uuid, env);
             }
 
             if (method === 'POST') {
+                // 仅保留生成配置的接口
                 if (path === '/generate') return generateConfigs(request, env);
-                if (path === '/manage/configs') return await handleAddConfig(request, env);
-            }
-
-            if (method === 'DELETE') {
-                const idMatch = manageID.exec(url);
-                if (idMatch) return await handleDeleteSingleConfig(idMatch.pathname.groups.id, env);
-                const uuidMatch = manageUUID.exec(url);
-                if (uuidMatch) return await handleDeleteConfigsByUuid(uuidMatch.pathname.groups.uuid, env);
             }
 
             return new Response('404 Not Found', { status: 404 });
@@ -637,7 +538,7 @@ export default {
 };
 
 // =================================================================
-//  SECTION 4: FRONTEND CONTENT
+//  SECTION 4: FRONTEND CONTENT (UNIFIED UI STYLE AND LINK BOX)
 // =================================================================
 
 const newGlobalStyle = `
@@ -648,7 +549,8 @@ body, html { margin: 0; padding: 0; min-height: 100%; background-color: #fff; fo
 .profile-name { font-size: 2.2rem; color: #3d474d; margin-bottom: 10px; font-weight: bold;}
 .profile-quote { color: #89949B; margin-bottom: 27px; min-height: 1.2em; }
 .nav-grid { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-bottom: 27px; }
-.nav-btn { padding: 8px 16px; text-align: center; background: #E8EBED; border: 2px solid #89949B; border-radius: 4px; color: #5a666d; text-decoration: none; font-weight: 500; font-size: 0.95rem; transition: all 0.3s; white-space: nowrap; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+/* Unified nav-btn style (compatible with A tags) */
+.nav-btn { display: inline-flex; align-items: center; justify-content: center; padding: 8px 16px; text-align: center; background: #E8EBED; border: 2px solid #89949B; border-radius: 4px; color: #5a666d; text-decoration: none !important; font-weight: 500; font-size: 0.95rem; line-height: 1.2; transition: all 0.3s; white-space: nowrap; cursor: pointer; box-sizing: border-box; }
 .nav-btn:hover:not(:disabled) { background: #89949B; color: white; }
 .nav-btn:disabled { opacity: 0.6; cursor: not-allowed;}
 .nav-btn.primary { background-color: #5a666d; color: white; border-color: #5a666d;}
@@ -665,10 +567,9 @@ textarea:focus, input[type="text"]:focus { outline: none; border-color: #3d474d;
 .radio-group input[type="radio"]:checked + span { background: #89949B; color: white; }
 .radio-group label:hover { background: #d1d5d8; }
 .radio-group input[type="radio"]:checked + span:hover { background: #89949B; color: white; }
-.info-box, .config-link-box { background-color: #e8ebed; color: #5a666d; border-left: 4px solid #89949B; padding: 12px 16px; border-radius: 4px; font-size: 0.85rem; text-align: left; line-height: 1.5; margin: 16px 0; }
-.info-box a, .config-link-box a { color: #3d474d; font-weight: bold; text-decoration: none; word-break: break-all; }
-.info-box a:hover, .config-link-box a:hover { text-decoration: underline; }
-.config-link-box button { padding: 4px 8px; font-size: 0.8rem; height: auto; border-radius: 3px; margin-left:10px; vertical-align: middle;}
+.info-box { background-color: #e8ebed; color: #5a666d; border-left: 4px solid #89949B; padding: 12px 16px; border-radius: 4px; font-size: 0.85rem; text-align: left; line-height: 1.5; margin: 16px 0; }
+.info-box a { color: #3d474d; font-weight: bold; text-decoration: none; word-break: break-all; }
+.info-box a:hover { text-decoration: underline; }
 .footer { margin-top: 40px; text-align: center; color: #89949B; font-size: 0.8rem; }
 .footer a { color: #89949B; text-decoration: none; }
 .footer a:hover { text-decoration: underline; }
@@ -679,7 +580,7 @@ textarea:focus, input[type="text"]:focus { outline: none; border-color: #3d474d;
 @keyframes fadeOut { from { opacity: 1; } to { opacity: 0; transform: translateX(100%); } }
 .loader { width: 16px; height: 16px; border: 2px solid white; border-bottom-color: transparent; border-radius: 50%; display: inline-block; box-sizing: border-box; animation: rotation 1s linear infinite; margin-right: 8px; }
 @keyframes rotation { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-@media (max-width: 768px) { html { font-size: 100%; } .container { padding: 20px 15px; justify-content: flex-start; } .profile-name { font-size: 1.8rem; } .profile-quote { font-size: 0.95rem; margin-bottom: 20px; } .card { padding: 20px 15px; margin-bottom: 20px; } .card h2 { font-size: 1.3rem; } .nav-btn { padding: 9px 12px; font-size: 0.9rem; } .table-container th, .table-container td { padding: 8px 10px; font-size: 0.8rem; } .config-data-cell { max-width: 150px; } #toast-container { top: 10px; left: 10px; right: 10px; width: auto; transform: translateX(0); align-items: center; } .toast { width: 100%; max-width: 400px; animation: slideDown 0.5s forwards, fadeOut 0.5s 4.5s forwards; } @keyframes slideDown { from { opacity: 0; transform: translateY(-100%); } to { opacity: 1; transform: translateY(0); } } @keyframes fadeOut { from { opacity: 1; } to { opacity: 0; transform: translateY(-20px); } } }
+@media (max-width: 768px) { html { font-size: 100%; } .container { padding: 20px 15px; justify-content: flex-start; } .profile-name { font-size: 1.8rem; } .profile-quote { font-size: 0.95rem; margin-bottom: 20px; } .card { padding: 20px 15px; margin-bottom: 20px; } .card h2 { font-size: 1.3rem; } .nav-btn { padding: 9px 12px; font-size: 0.9rem; } }
 `;
 
 const generatePageHtmlContent = `
@@ -701,7 +602,7 @@ const generatePageHtmlContent = `
 
       <div class="nav-grid">
         <a href="/" class="nav-btn primary">批量生成</a>
-        <a href="/manage" class="nav-btn">配置管理</a>
+        <a href="https://config-cfst.api.yangzifun.org/" target="_blank" class="nav-btn">配置管理</a>
       </div>
 
       <div class="card">
@@ -715,7 +616,7 @@ const generatePageHtmlContent = `
         </div>
         <div id="genUuidConfigInput" class="form-group hidden">
             <input type="text" id="genBaseConfigUuidInput" placeholder="输入已存储的UUID，如 my-configs">
-            <div class="info-box">在 <a href="/manage" target="_blank">配置管理</a> 页面添加和管理UUID。</div>
+            <div class="info-box">在 <a href="https://config-cfst.api.yangzifun.org/" target="_blank">配置管理</a> 页面添加和管理UUID。</div>
         </div>
       </div>
 
@@ -761,10 +662,11 @@ const generatePageHtmlContent = `
         </div>
 
         <button id="genFetchBtn" class="nav-btn" style="width:100%; margin-bottom: 16px;" onclick="genFetchAddresses()">获取优选列表</button>
-
-        <div id="ipSubscriptionLinkBox" class="config-link-box hidden">
-            <strong>列表订阅:</strong> <a id="ipSubscriptionLink" href="#" target="_blank"></a>
-            <button class="nav-btn" onclick="copyIpSubscriptionLink()">复制</button>
+        
+        <!-- Modified Link Display: Using Input for Unified Style -->
+        <div id="ipSubscriptionLinkBox" class="form-group hidden" style="display:none; gap:10px;">
+            <input type="text" id="ipSubscriptionLink" readonly style="margin-bottom:0; color:#5a666d; background-color: #f8f9fa;">
+            <button class="nav-btn" onclick="copyIpSubscriptionLink()" style="white-space: nowrap;">复制</button>
         </div>
 
         <textarea id="genAddressListInput" placeholder="点击上方按钮获取，或在此手动粘贴 IP 或 域名 列表..." rows="6"></textarea>
@@ -772,9 +674,11 @@ const generatePageHtmlContent = `
 
       <div class="card">
         <h2>3. 生成结果</h2>
-        <div id="generatedLinkBox" class="config-link-box hidden">
-          <strong>节点订阅链接:</strong> <a id="generatedConfigLink" href="#" target="_blank"></a>
-          <button class="nav-btn" onclick="copyGeneratedLink()">复制</button>
+        <!-- Modified Link Display: Using Input for Unified Style -->
+        <div id="generatedLinkBox" class="form-group hidden" style="display:none; gap:10px;">
+           <label style="align-self:center; white-space:nowrap; margin-bottom:0; margin-right:5px;">订阅:</label>
+           <input type="text" id="generatedConfigLink" readonly style="margin-bottom:0; color:#5a666d; background-color: #f8f9fa;">
+           <button class="nav-btn" onclick="copyGeneratedLink()" style="white-space: nowrap;">复制</button>
         </div>
         <textarea id="genResultTextarea" readonly placeholder="点击下方“生成配置”按钮..." rows="8"></textarea>
       </div>
@@ -783,15 +687,15 @@ const generatePageHtmlContent = `
       <button id="copyResultButton" class="nav-btn" style="width:100%; margin-top: 10px;" onclick="copyResults()">复制结果 (Base64)</button>
 
       <footer class="footer">
-        <p>Powered by YZFN</p>
+         <p>Powered by <a href="https://www.yangzihome.space">YZFN</a> | <a href="https://www.yangzihome.space/security.html">安全声明</a></p>
       </footer>
     </div>
   </div>
 
   <script>
     const WORKER_DOMAIN = "YOUR_WORKER_DOMAIN_PATH";
-    const toastIcons = { success: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm-1.293-6.293a1 1 0 011.414 0L12 13.414l2.879-2.88a1 1 0 111.414 1.415l-3.586 3.586a1 1 0 01-1.414 0L8.707 13.121a1 1 0 010-1.414z" clip-rule="evenodd" /></svg>', error: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" /></svg>', info: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd" /></svg>' };
-    function showToast(msg, type='info') { const c = document.getElementById('toast-container'); const t = document.createElement('div'); t.className = 'toast'; t.innerHTML = \`\${toastIcons[type]}<span>\${msg}</span>\`; c.appendChild(t); setTimeout(()=>t.remove(), 5000); }
+    const toastIcons = { success: '✅', error: '❌', info: 'ℹ️' };
+    function showToast(msg, type='info') { const c = document.getElementById('toast-container'); const t = document.createElement('div'); t.className = 'toast'; t.innerHTML = \`<span>\${toastIcons[type]} \${msg}</span>\`; c.appendChild(t); setTimeout(()=>t.remove(), 5000); }
     function setButtonLoading(btn, ld, txt) { if(ld){ btn.disabled=true; btn.innerHTML='<span class="loader"></span>处理中...'; } else { btn.disabled=false; btn.innerHTML=txt; } }
     
     function toggleAddressOptions() {
@@ -811,6 +715,7 @@ const generatePageHtmlContent = `
         const isManual = document.querySelector('input[name="genConfigSource"]:checked').value === 'manual';
         document.getElementById('genManualConfigInput').classList.toggle('hidden', !isManual);
         document.getElementById('genUuidConfigInput').classList.toggle('hidden', isManual);
+        document.getElementById('generatedLinkBox').style.display = 'none';
         document.getElementById('generatedLinkBox').classList.add('hidden');
     }
 
@@ -820,9 +725,10 @@ const generatePageHtmlContent = `
         setButtonLoading(btn, true, orgTxt);
         const listInput = document.getElementById('genAddressListInput');
         const subBox = document.getElementById('ipSubscriptionLinkBox');
-        const subLink = document.getElementById('ipSubscriptionLink');
+        const subLinkInput = document.getElementById('ipSubscriptionLink');
         
         listInput.value = '';
+        subBox.style.display = 'none';
         subBox.classList.add('hidden');
 
         const addrType = document.querySelector('input[name="genAddressType"]:checked').value;
@@ -837,9 +743,10 @@ const generatePageHtmlContent = `
              subUrl += \`&ipType=\${encodeURIComponent(ipType)}&carrier=\${encodeURIComponent(carrier)}\`;
              fetchUrl += \`&ipType=\${encodeURIComponent(ipType)}&carrierType=\${encodeURIComponent(carrier)}&source=\${src}\`;
         }
-
-        subLink.href = subUrl;
-        subLink.textContent = subUrl;
+        
+        // Changed to utilize Input value instead of href
+        subLinkInput.value = subUrl;
+        subBox.style.display = 'flex';
         subBox.classList.remove('hidden');
 
         try {
@@ -862,9 +769,10 @@ const generatePageHtmlContent = `
         setButtonLoading(btn, true, orgTxt);
         const resArea = document.getElementById('genResultTextarea');
         const genLinkBox = document.getElementById('generatedLinkBox');
-        const genLink = document.getElementById('generatedConfigLink');
+        const genLinkInput = document.getElementById('generatedConfigLink');
         
         resArea.value = '';
+        genLinkBox.style.display = 'none';
         genLinkBox.classList.add('hidden');
 
         const source = document.querySelector('input[name="genConfigSource"]:checked').value;
@@ -900,8 +808,9 @@ const generatePageHtmlContent = `
                     const carrier = document.querySelector('input[name="genCarrierType"]:checked').value;
                     linkUrl += \`&ipType=\${encodeURIComponent(ipType)}&carrier=\${encodeURIComponent(carrier)}\`;
                 }
-                genLink.href = linkUrl;
-                genLink.textContent = linkUrl;
+                // Changed to utilize Input value
+                genLinkInput.value = linkUrl;
+                genLinkBox.style.display = 'flex';
                 genLinkBox.classList.remove('hidden');
             }
         } catch(e) { showToast(e.message, 'error'); resArea.value = '错误:\\n' + e.message; }
@@ -914,129 +823,15 @@ const generatePageHtmlContent = `
         const c = v.split('\\n').filter(l => !l.startsWith('[错误]')).join('\\n');
         navigator.clipboard.writeText(btoa(c)).then(()=>showToast('已复制Base64', 'success'), ()=>showToast('复制失败','error'));
     }
-    function copyGeneratedLink() { navigator.clipboard.writeText(document.getElementById('generatedConfigLink').href).then(()=>showToast('链接已复制','success')); }
-    function copyIpSubscriptionLink() { navigator.clipboard.writeText(document.getElementById('ipSubscriptionLink').href).then(()=>showToast('链接已复制','success')); }
+    // Updated copy functions for Inputs
+    function copyGeneratedLink() { navigator.clipboard.writeText(document.getElementById('generatedConfigLink').value).then(()=>showToast('链接已复制','success')); }
+    function copyIpSubscriptionLink() { navigator.clipboard.writeText(document.getElementById('ipSubscriptionLink').value).then(()=>showToast('链接已复制','success')); }
 
     document.addEventListener('DOMContentLoaded', () => {
         document.querySelectorAll('input[name="genConfigSource"]').forEach(r => r.addEventListener('change', toggleGenConfigSource));
         toggleGenConfigSource();
         toggleAddressOptions();
     });
-  </script>
-</body>
-</html>
-`;
-
-const managePageHtmlContent = `
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="icon" href="https://s3.yangzifun.org/logo.ico" type="image/x-icon">
-  <title>基础配置管理器</title>
-  <style>${newGlobalStyle}
-    .table-container { overflow-x: auto; border: 2px solid #89949B; border-radius: 4px; background: #fff; margin-top:20px;}
-    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-    th, td { padding: 10px 14px; text-align: left; border-bottom: 2px solid #E8EBED; white-space: nowrap; }
-    th { font-weight: bold; color: #3d474d; background-color: #f0f2f5; }
-    tr:last-child td { border-bottom: none; }
-    .config-data-cell { white-space: normal; word-break: break-all; max-width: 300px;}
-    .actions-cell button { margin-right: 5px; }
-    .placeholder { padding: 40px; text-align: center; color: #89949B; }
-  </style>
-</head>
-<body>
-  <div id="toast-container"></div>
-  <div class="container">
-    <div class="content-group">
-      <h1 class="profile-name">基础配置管理器</h1>
-      <p class="profile-quote">在这里添加、查询和删除用于批量生成的基础配置</p>
-
-      <div class="nav-grid">
-        <a href="/" class="nav-btn">批量生成</a>
-        <a href="/manage" class="nav-btn primary">配置管理</a>
-      </div>
-
-      <div class="card">
-        <h2>1. 操作指定 UUID</h2>
-        <div class="form-group">
-            <label for="queryUuidInput">输入要操作的 UUID</label>
-            <input type="text" id="queryUuidInput" placeholder="例如: my-home-configs">
-        </div>
-        <div class="nav-grid" style="justify-content: flex-start;">
-            <button id="queryBtn" class="nav-btn primary" onclick="manageQueryByUuid()">查询配置</button>
-            <button id="deleteBtn" class="nav-btn" onclick="manageDeleteGroupdByUuid()">删除所有</button>
-        </div>
-      </div>
-
-      <div class="card">
-        <h2>2. 查询结果</h2>
-        <div id="queryResultsContainer">
-            <p class="placeholder">请输入一个 UUID 并点击查询。</p>
-        </div>
-      </div>
-
-      <div class="card">
-        <h2>3. 批量添加配置</h2>
-        <form id="manageConfigForm" onsubmit="event.preventDefault(); manageAddConfig();">
-            <div class="form-group">
-              <label for="addUuidInput">目标 UUID</label>
-              <input type="text" id="addUuidInput" placeholder="将配置添加到哪个 UUID" required>
-            </div>
-            <div class="form-group">
-                <label for="addConfigData">配置数据 (每行一个链接)</label>
-                <textarea id="addConfigData" required placeholder="vmess://...\\nvless://...\\ntrojan://..." rows="6"></textarea>
-            </div>
-            <button type="submit" id="addConfigBtn" class="nav-btn primary" style="width: auto;">确认批量添加</button>
-        </form>
-      </div>
-      <footer class="footer"><p>Powered by YZFN</p></footer>
-    </div>
-  </div>
-
-  <script>
-    const toastIcons = { success: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm-1.293-6.293a1 1 0 011.414 0L12 13.414l2.879-2.88a1 1 0 111.414 1.415l-3.586 3.586a1 1 0 01-1.414 0L8.707 13.121a1 1 0 010-1.414z" clip-rule="evenodd" /></svg>', error: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" /></svg>', info: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd" /></svg>' };
-    function showToast(message, type = 'info') { const container = document.getElementById('toast-container'); const toast = document.createElement('div'); toast.className = 'toast'; toast.innerHTML = \`\${toastIcons[type]}<span>\${message}</span>\`; container.appendChild(toast); setTimeout(() => toast.remove(), 5000); }
-    function setButtonLoading(button, isLoading, originalText = '') { if (isLoading) { button.disabled = true; button.dataset.originalText = button.innerHTML; button.innerHTML = '<span class="loader"></span>处理中...'; } else { button.disabled = false; button.innerHTML = originalText || button.dataset.originalText; } }
-    async function manageQueryByUuid() {
-        const button = document.getElementById('queryBtn'); setButtonLoading(button, true);
-        const uuid = document.getElementById('queryUuidInput').value.trim();
-        const resultsContainer = document.getElementById('queryResultsContainer');
-        if (!uuid) { showToast('请输入要查询的UUID。', 'error'); setButtonLoading(button, false); return; }
-        try {
-            const response = await fetch(\`/manage/configs/\${uuid}\`);
-            const data = await response.json();
-            document.getElementById('addUuidInput').value = uuid;
-            if (response.status === 404) { resultsContainer.innerHTML = '<p class="placeholder">未找到此 UUID 的配置。</p>'; showToast('未找到配置。', 'info'); return; }
-            if (data.configs && data.configs.length > 0) {
-                let tableHtml = '<div class="table-container"><table><thead><tr><th>ID</th><th>备注</th><th>协议</th><th class="config-data-cell">配置数据</th><th class="actions-cell">操作</th></tr></thead><tbody>';
-                data.configs.forEach(config => { tableHtml += \`<tr><td>\${config.id}</td><td>\${config.remark || '---'}</td><td>\${config.protocol}</td><td class="config-data-cell" title="\${config.config_data}">\${config.config_data}</td><td class="actions-cell"><button class="nav-btn" style="background-color:#d44" onclick="manageDeleteSingleConfig(event, \${config.id})">删除</button></td></tr>\`; });
-                tableHtml += '</tbody></table></div>'; resultsContainer.innerHTML = tableHtml; showToast(\`查询到 \${data.configs.length} 条配置。\`, 'success');
-            } else { resultsContainer.innerHTML = '<p class="placeholder">没有配置。</p>'; }
-        } catch (error) { resultsContainer.innerHTML = \`<p class="placeholder" style="color:red;">查询失败: \${error.message}</p>\`; showToast(error.message, 'error'); } finally { setButtonLoading(button, false); }
-    }
-    async function manageAddConfig() {
-      const button = document.getElementById('addConfigBtn'); setButtonLoading(button, true);
-      const uuid = document.getElementById('addUuidInput').value.trim(); const config_data = document.getElementById('addConfigData').value.trim();
-      try {
-        if (!uuid || !config_data) throw new Error("不能为空");
-        await fetch('/manage/configs', { method: 'POST', header:{'Content-Type':'application/json'}, body: JSON.stringify({ uuid, config_data }) });
-        showToast('添加成功', 'success'); document.getElementById('addConfigData').value = '';
-        if (uuid === document.getElementById('queryUuidInput').value.trim()) await manageQueryByUuid();
-      } catch (error) { showToast(error.message, 'error'); } finally { setButtonLoading(button, false); }
-    }
-    async function manageDeleteGroupdByUuid() {
-        if (!confirm(\`确定删除所有配置吗？\`)) return;
-        const button = document.getElementById('deleteBtn'); setButtonLoading(button, true);
-        const uuid = document.getElementById('queryUuidInput').value.trim();
-        try { await fetch(\`/manage/configs/\${uuid}\`, { method: 'DELETE' }); showToast('删除成功', 'success'); manageQueryByUuid(); } catch(e) { showToast(e.message, 'error'); } finally { setButtonLoading(button, false); }
-    }
-    async function manageDeleteSingleConfig(event, configId) {
-        if (!confirm(\`确定删除 ID \${configId} 吗？\`)) return;
-        const button = event.currentTarget; setButtonLoading(button, true);
-        try { await fetch(\`/manage/configs/id/\${configId}\`, { method: 'DELETE' }); showToast('删除成功', 'success'); manageQueryByUuid(); } catch (e) { showToast(e.message, 'error'); setButtonLoading(button, false); }
-    }
   </script>
 </body>
 </html>
