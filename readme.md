@@ -277,6 +277,7 @@ sequenceDiagram
 | `POST` | `/api/mfa/disable`                | 禁用MFA                  |
 | `POST` | `/api/mfa/backup-codes/regenerate`| 重新生成备份码           |
 
+
 ### 自动更新设置接口说明
 - **获取自动更新设置** (`GET /api/settings/auto-update`): 
   返回当前自动更新配置，包括每个数据源（global, hostmonit, vps789）的启用状态

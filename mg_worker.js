@@ -382,7 +382,9 @@ async function handleMfaInit(req, env) {
             success: true,
             secret: newSecret,
             otpauth_url: otpauth_url,
-            message: '请使用身份验证器App扫描二维码或手动输入密钥'
+            otpauth_url_encoded: encodeURIComponent(otpauth_url),
+            qr_url: `https://qrcode.api.yangzifun.org/?data=${encodeURIComponent(otpauth_url)}&size=200`,
+            message: '请使用身份验证器App手动输入密钥'
         });
     } catch (error) {
         return jsonResponse({ error: '服务器错误' }, 500);
@@ -1347,7 +1349,6 @@ const adminHtml = `
             </div>
             <div>
                 <a class="action-link" onclick="openPwdModal()">修改密码</a>
-                <a class="action-link" onclick="openMfaSettingsModal()">安全设置</a>
                 <a class="action-link logout" onclick="logout()">安全退出</a>
             </div>
         </div>
@@ -1573,16 +1574,19 @@ const adminHtml = `
         </div>
     </div>
 
-    <!-- MFA设置弹窗 -->
-    <div class="modal-overlay" id="mfaModal" onclick="event.target===this && (this.style.display='none')">
+
+
+    <!-- MFA 验证密码弹窗（统一风格，替换原生 prompt） -->
+    <div class="modal-overlay" id="mfaAuthModal" onclick="event.target===this && (this.style.display='none')">
         <div class="modal">
-            <h3 style="margin-top:0; color:#3d474d">双重验证设置</h3>
-            <div id="mfaModalContent">
-                <p>请前往安全中心进行MFA设置</p>
+            <h3 style="margin-top:0; color:#3d474d">验证身份以启用双重验证</h3>
+            <div style="margin-top:10px;">
+                <input type="password" id="mfaAuthPassword" placeholder="请输入当前密码" autocomplete="current-password" onkeydown="if(event.key==='Enter') submitMfaAuthModal()">
+                <div id="mfaAuthError" style="color:#ef4444; margin-top:8px; display:none;"></div>
             </div>
             <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:20px;">
-                <button class="nav-btn" onclick="document.getElementById('mfaModal').style.display='none'">关闭</button>
-                <button class="nav-btn active" onclick="switchTab('security')">前往安全中心</button>
+                <button class="nav-btn" onclick="document.getElementById('mfaAuthModal').style.display='none'; window._mfaAuthCallback=null;">取消</button>
+                <button class="nav-btn active" onclick="submitMfaAuthModal()">继续</button>
             </div>
         </div>
     </div>
@@ -1863,11 +1867,7 @@ const adminHtml = `
                     <div>双重验证: <span style="color:#10b981">已启用</span></div>
                     <div>\${lastLogin}</div>
                     <div>\${backupCount}</div>
-                    <div style="margin-top:10px;">
-                        <button class="nav-btn small" onclick="switchTab('security')">
-                            管理安全设置
-                        </button>
-                    </div>
+
                 \`;
             } else {
                 mfaBadge.innerHTML = '⚠️ MFA未启用';
@@ -1924,30 +1924,29 @@ const adminHtml = `
 
         async function startMfaSetup() {
             const username = getCurrentUsername();
-            const password = prompt('请输入当前密码以继续：');
-            if (!password) return;
-            
-            try {
-                const response = await fetch('/api/mfa/init', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        username: username,
-                        password: password
-                    })
-                });
-                
-                const data = await response.json();
-                
-                if (response.ok) {
-                    currentMfaSecret = data.secret;
-                    showMfaSetupStep1(data);
-                } else {
-                    toast(data.error || '初始化失败', 'error');
+            // 使用统一风格的密码验证弹窗代替原生 prompt
+            openMfaAuthModal(async (password) => {
+                if (!password) return;
+                try {
+                    const response = await fetch('/api/mfa/init', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            username: username,
+                            password: password
+                        })
+                    });
+                    const data = await response.json();
+                    if (response.ok) {
+                        currentMfaSecret = data.secret;
+                        showMfaSetupStep1(data);
+                    } else {
+                        toast(data.error || '初始化失败', 'error');
+                    }
+                } catch (error) {
+                    toast('网络错误，请重试', 'error');
                 }
-            } catch (error) {
-                toast('网络错误，请重试', 'error');
-            }
+            });
         }
 
         function showMfaSetupStep1(data) {
@@ -1955,7 +1954,7 @@ const adminHtml = `
             setupSteps.style.display = 'block';
             setupSteps.innerHTML = \`
                 <div class="security-step">
-                    <h4>步骤 1: 扫描二维码或输入密钥</h4>
+                    <h4>步骤 1: 输入密钥</h4>
                     <p style="font-size:0.9rem; color:#6b7280;">
                         使用身份验证器App（如Google Authenticator、Microsoft Authenticator、Authy等）：
                     </p>
@@ -1970,7 +1969,7 @@ const adminHtml = `
                             <ol>
                                 <li>打开身份验证器App</li>
                                 <li>点击"添加账户"或"+"按钮</li>
-                                <li>选择"扫描二维码"或"手动输入密钥"</li>
+                                <li>选择"手动输入密钥"</li>
                                 <li>输入密钥：<strong>\${currentMfaSecret}</strong></li>
                                 <li>账户名：<strong>\${getCurrentUsername()}</strong></li>
                                 <li>类型：<strong>TOTP</strong></li>
@@ -2045,6 +2044,12 @@ const adminHtml = `
                 if (response.ok) {
                     showBackupCodes(data.backup_codes);
                     currentMfaSecret = '';
+                    // 隐藏并清空设置面板，避免在启用后仍显示步骤内容
+                    const setupSteps = document.getElementById('mfaSetupSteps');
+                    if (setupSteps) {
+                        setupSteps.style.display = 'none';
+                        setupSteps.innerHTML = '';
+                    }
                     await checkMfaStatus();
                     toast('双重验证已成功启用！');
                 } else {
@@ -2088,10 +2093,10 @@ const adminHtml = `
 
         function disableMfaConfirm() {
             if (confirm('确定要禁用双重验证吗？禁用后您的账户将只有密码保护。')) {
-                const password = prompt('请输入当前密码以确认：');
-                if (!password) return;
-                
-                disableMfa(password);
+                openMfaAuthModal(async (password) => {
+                    if (!password) return;
+                    disableMfa(password);
+                });
             }
         }
 
@@ -2104,15 +2109,15 @@ const adminHtml = `
         }
 
         async function regenerateBackupCodes() {
-            const password = prompt('请输入当前密码以重新生成备份码：');
-            if (!password) return;
-            
-            const res = await api('mfa/backup-codes/regenerate', 'POST', { password });
-            if (res && res.success) {
-                showBackupCodes(res.backup_codes);
-                await checkMfaStatus();
-                toast('备份码已重新生成');
-            }
+            openMfaAuthModal(async (password) => {
+                if (!password) return;
+                const res = await api('mfa/backup-codes/regenerate', 'POST', { password });
+                if (res && res.success) {
+                    showBackupCodes(res.backup_codes);
+                    await checkMfaStatus();
+                    toast('备份码已重新生成');
+                }
+            });
         }
 
         // ============ 通用工具函数 ============
@@ -2186,7 +2191,31 @@ const adminHtml = `
             document.getElementById('pwdModal').style.display = 'flex';
         }
 
-        function openMfaSettingsModal() {
+        // 打开一个统一风格的验证密码弹窗，回调在确认后执行
+        function openMfaAuthModal(callback) {
+            window._mfaAuthCallback = callback;
+            const modal = document.getElementById('mfaAuthModal');
+            modal.style.display = 'flex';
+            document.getElementById('mfaAuthPassword').value = '';
+            document.getElementById('mfaAuthError').style.display = 'none';
+            setTimeout(()=>document.getElementById('mfaAuthPassword').focus(), 100);
+        }
+
+        function submitMfaAuthModal() {
+            const pwd = document.getElementById('mfaAuthPassword').value;
+            if (!pwd) {
+                const err = document.getElementById('mfaAuthError');
+                err.textContent = '请输入当前密码';
+                err.style.display = '';
+                return;
+            }
+            const cb = window._mfaAuthCallback;
+            window._mfaAuthCallback = null;
+            document.getElementById('mfaAuthModal').style.display = 'none';
+            if (typeof cb === 'function') cb(pwd);
+        }
+
+        function openMfaSettingsModal() { return; /* removed */
             document.getElementById('mfaModal').style.display = 'flex';
             document.getElementById('mfaModalContent').innerHTML = \`
                 <p>请选择您要进行的操作：</p>
