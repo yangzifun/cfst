@@ -39,6 +39,12 @@ function getProtocol(configStr) {
     if (configStr.startsWith('vmess://')) return 'vmess';
     if (configStr.startsWith('vless://')) return 'vless';
     if (configStr.startsWith('trojan://')) return 'trojan';
+    if (configStr.startsWith('hysteria2://')) return 'hysteria2';
+    if (configStr.startsWith('tuic://')) return 'tuic';
+    if (configStr.startsWith('anytls://')) return 'anytls';
+    if (configStr.startsWith('socks5://')) return 'socks5';
+    if (configStr.startsWith('any-reality://')) return 'any-reality';
+    if (configStr.startsWith('ss://')) return 'ss';
     return 'unknown';
 }
 
@@ -47,8 +53,10 @@ function extractRemarkFromConfig(configStr, protocol) {
         if (protocol === 'vmess') {
             const vmessObj = JSON.parse(b64_to_utf8(configStr.substring(8)));
             return vmessObj.ps || vmessObj.remark || null;
-        }
-        if (protocol === 'vless' || protocol === 'trojan') {
+        } else if (protocol === 'vless' || protocol === 'trojan' || 
+                  protocol === 'hysteria2' || protocol === 'tuic' ||
+                  protocol === 'anytls' || protocol === 'socks5' ||
+                  protocol === 'any-reality' || protocol === 'ss') {
             const url = new URL(configStr);
             if (url.hash) return decodeURIComponent(url.hash.substring(1));
         }
@@ -273,8 +281,8 @@ export default {
                 }
             }
 
-            if (method === 'POST' && path === '/manage/configs') return await handleAddConfig(request, env);
-            if (method === 'PUT' && path === '/manage/configs') return await handleUpdateConfig(request, env);
+    if (method === 'POST' && path === '/manage/configs') return await handleAddConfig(request, env);
+    if (method === 'PUT' && path === '/manage/configs') return await handleUpdateConfig(request, env);
             
             if (method === 'DELETE') {
                 const idMatch = manageID.exec(url);
@@ -528,16 +536,37 @@ trojan://..." rows="4"></textarea></div>
     function openEditModal(config) {
         document.getElementById('edit-id').value = config.id;
         let p = 'unknown'; const l = config.config_data;
-        if(l.startsWith('vmess://')) p='vmess'; else if(l.startsWith('vless://')) p='vless'; else if(l.startsWith('trojan://')) p='trojan';
+        if(l.startsWith('vmess://')) p='vmess'; 
+        else if(l.startsWith('vless://')) p='vless'; 
+        else if(l.startsWith('trojan://')) p='trojan';
+        else if(l.startsWith('hysteria2://')) p='hysteria2';
+        else if(l.startsWith('tuic://')) p='tuic';
+        else if(l.startsWith('anytls://')) p='anytls';
+        else if(l.startsWith('socks5://')) p='socks5';
+        else if(l.startsWith('any-reality://')) p='any-reality';
+        else if(l.startsWith('ss://')) p='ss';
+        
         document.getElementById('edit-protocol').value = p;
         ['ps','add','port','id-uuid','net','type','host','path','tls','sni'].forEach(k=>document.getElementById('edit-'+k).value='');
         try {
             if (p === 'vmess') {
                 const c = JSON.parse(b64DecodeUnicode(l.substring(8)));
                 document.getElementById('edit-ps').value = c.ps||''; document.getElementById('edit-add').value = c.add||''; document.getElementById('edit-port').value = c.port||''; document.getElementById('edit-id-uuid').value = c.id||''; document.getElementById('edit-net').value = c.net||'tcp'; document.getElementById('edit-type').value = c.type||''; document.getElementById('edit-host').value = c.host||''; document.getElementById('edit-path').value = c.path||''; document.getElementById('edit-tls').value = c.tls||''; document.getElementById('edit-sni').value = c.sni||'';
-            } else if (p === 'vless' || p === 'trojan') {
+            } else if (p === 'vless' || p === 'trojan' || 
+                      p === 'hysteria2' || p === 'tuic' ||
+                      p === 'anytls' || p === 'socks5' ||
+                      p === 'any-reality' || p === 'ss') {
                 const u = new URL(l);
-                document.getElementById('edit-ps').value = u.hash?decodeURIComponent(u.hash.substring(1)):''; document.getElementById('edit-add').value = u.hostname; document.getElementById('edit-port').value = u.port; document.getElementById('edit-id-uuid').value = u.username; document.getElementById('edit-net').value = u.searchParams.get('type')||'tcp'; document.getElementById('edit-type').value = u.searchParams.get('headerType')||''; document.getElementById('edit-host').value = u.searchParams.get('host')||''; document.getElementById('edit-path').value = u.searchParams.get('path')||u.searchParams.get('serviceName')||''; document.getElementById('edit-tls').value = u.searchParams.get('security')==='tls'?'tls':''; document.getElementById('edit-sni').value = u.searchParams.get('sni')||'';
+                document.getElementById('edit-ps').value = u.hash?decodeURIComponent(u.hash.substring(1)):''; 
+                document.getElementById('edit-add').value = u.hostname; 
+                document.getElementById('edit-port').value = u.port; 
+                document.getElementById('edit-id-uuid').value = u.username; 
+                document.getElementById('edit-net').value = u.searchParams.get('type')||'tcp'; 
+                document.getElementById('edit-type').value = u.searchParams.get('headerType')||''; 
+                document.getElementById('edit-host').value = u.searchParams.get('host')||''; 
+                document.getElementById('edit-path').value = u.searchParams.get('path')||u.searchParams.get('serviceName')||''; 
+                document.getElementById('edit-tls').value = u.searchParams.get('security')==='tls'?'tls':''; 
+                document.getElementById('edit-sni').value = u.searchParams.get('sni')||'';
             }
         } catch(e) { alert('解析失败'); return; }
         document.getElementById('editModalOverlay').classList.add('open');
@@ -545,21 +574,65 @@ trojan://..." rows="4"></textarea></div>
     function closeEditModal() { document.getElementById('editModalOverlay').classList.remove('open'); }
     
     async function saveEditedConfig() {
-        const id=document.getElementById('edit-id').value; const proto=document.getElementById('edit-protocol').value;
-        const ps=document.getElementById('edit-ps').value; const add=document.getElementById('edit-add').value; const port=document.getElementById('edit-port').value; const uuid=document.getElementById('edit-id-uuid').value; const net=document.getElementById('edit-net').value; const type=document.getElementById('edit-type').value; const host=document.getElementById('edit-host').value; const path=document.getElementById('edit-path').value; const tls=document.getElementById('edit-tls').value; const sni=document.getElementById('edit-sni').value;
+        const id = document.getElementById('edit-id').value;
+        const proto = document.getElementById('edit-protocol').value;
+        const ps = document.getElementById('edit-ps').value;
+        const add = document.getElementById('edit-add').value;
+        const port = document.getElementById('edit-port').value;
+        const uuid = document.getElementById('edit-id-uuid').value;
+        const net = document.getElementById('edit-net').value;
+        const type = document.getElementById('edit-type').value;
+        const host = document.getElementById('edit-host').value;
+        const path = document.getElementById('edit-path').value;
+        const tls = document.getElementById('edit-tls').value;
+        const sni = document.getElementById('edit-sni').value;
+        
         let nL = '';
         if (proto === 'vmess') {
-            nL = 'vmess://' + b64EncodeUnicode(JSON.stringify({v:"2",ps,add,port,id:uuid,aid:"0",scy:"auto",net,type,host,path,tls,sni}));
-        } else {
-            let u = new URL(\`\${proto}://\${uuid}@\${add}:\${port}\`);
-            if(net!=='tcp') u.searchParams.set('type',net); if(type) u.searchParams.set('headerType',type); if(tls==='tls') { u.searchParams.set('security','tls'); if(sni) u.searchParams.set('sni',sni); } if(host) u.searchParams.set('host',host); if(path) { if(net==='grpc') u.searchParams.set('serviceName',path); else u.searchParams.set('path',path); }
-            u.hash = encodeURIComponent(ps); nL = u.toString();
+            nL = 'vmess://' + b64EncodeUnicode(JSON.stringify({
+                v: "2", ps, add, port, id: uuid, aid: "0", scy: "auto",
+                net, type, host, path, tls, sni
+            }));
+        } else if (proto === 'vless' || proto === 'trojan' || 
+                  proto === 'hysteria2' || proto === 'tuic' ||
+                  proto === 'anytls' || proto === 'socks5' ||
+                  proto === 'any-reality' || proto === 'ss') {
+            let u = new URL(proto + '://' + uuid + '@' + add + ':' + port);
+            if (net !== 'tcp') u.searchParams.set('type', net);
+            if (type) u.searchParams.set('headerType', type);
+            if (tls === 'tls') {
+                u.searchParams.set('security', 'tls');
+                if (sni) u.searchParams.set('sni', sni);
+            }
+            if (host) u.searchParams.set('host', host);
+            if (path) {
+                if (net === 'grpc') u.searchParams.set('serviceName', path);
+                else u.searchParams.set('path', path);
+            }
+            u.hash = encodeURIComponent(ps);
+            nL = u.toString();
         }
-        const b=document.querySelector('.modal .primary'); const o=b.innerHTML; setButtonLoading(b,true);
+        
+        const b = document.querySelector('.modal .primary');
+        const o = b.innerHTML;
+        setButtonLoading(b, true);
         try {
-            const r = await fetch('/manage/configs', { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id, config_data: nL}) });
-            if((await r.json()).success) { showToast('保存成功','success'); closeEditModal(); manageQueryByUuid(); }
-        } catch(e) { showToast(e.message,'error'); } finally { setButtonLoading(b,false,o); }
+            const r = await fetch('/manage/configs', {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id, config_data: nL})
+            });
+            const result = await r.json();
+            if (result.success) {
+                showToast('保存成功', 'success');
+                closeEditModal();
+                manageQueryByUuid();
+            }
+        } catch (e) {
+            showToast(e.message, 'error');
+        } finally {
+            setButtonLoading(b, false, o);
+        }
     }
 
     /* Statistics Functions */

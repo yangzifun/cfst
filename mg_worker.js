@@ -262,24 +262,34 @@ class TOTP {
 }
 
 // =================================================================
-//  4. IP获取函数
+//  4. IP获取函数 (已修改)
 // =================================================================
 
-async function fetchIpsFromHostMonit() {
+async function fetchIpsFromHostMonit(type = 'v4') {
     try {
+        const requestBody = { key: "iDetkOys" };
+        if (type === 'v6') {
+            requestBody.type = 'v6';
+        }
+        
         const res = await fetch('https://api.hostmonit.com/get_optimization_ip', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ key: "iDetkOys" })
+            body: JSON.stringify(requestBody)
         });
+        
         if (!res.ok) return [];
         const data = await res.json();
         return (data.code === 200 && Array.isArray(data.info)) ? data.info.map(i => ({
-            ip: i.ip.includes(':') ? `[${i.ip}]` : i.ip,
+            ip: i.ip,  // 直接使用IP，不添加方括号
             ip_type: i.ip.includes(':') ? 'v6' : 'v4',
-            carrier: i.line
+            carrier: i.line,
+            source: `hostmonit_${type}`  // 记录来源
         })) : [];
-    } catch (e) { return []; }
+    } catch (e) { 
+        console.error(`fetchIpsFromHostMonit ${type} error:`, e.message);
+        return []; 
+    }
 }
 
 async function fetchIpsFromVps789() {
@@ -294,15 +304,19 @@ async function fetchIpsFromVps789() {
                 if (Array.isArray(arr)) {
                     let c = ['CT', 'CU', 'CM'].includes(k) ? k : 'ALL';
                     arr.forEach(i => ips.push({
-                        ip: i.ip.includes(':') ? `[${i.ip}]` : i.ip,
+                        ip: i.ip,  // 直接使用IP，不添加方括号
                         ip_type: i.ip.includes(':') ? 'v6' : 'v4',
-                        carrier: c
+                        carrier: c,
+                        source: 'vps789'  // 记录来源
                     }));
                 }
             }
         }
         return ips;
-    } catch (e) { return []; }
+    } catch (e) { 
+        console.error('fetchIpsFromVps789 error:', e.message);
+        return []; 
+    }
 }
 
 async function runIpUpdateTask(env, sources = null) {
@@ -311,8 +325,8 @@ async function runIpUpdateTask(env, sources = null) {
     if (sources === null) {
         try {
             const settingsRes = await env.DB.prepare(
-                'SELECT source, enabled FROM auto_update_settings WHERE source IN (?, ?)'
-            ).bind('hostmonit', 'vps789').all();
+                'SELECT source, enabled FROM auto_update_settings WHERE source IN (?, ?, ?, ?)'
+            ).bind('hostmonit_v4', 'hostmonit_v6', 'vps789', 'global_enabled').all();
             
             if (settingsRes && settingsRes.results) {
                 sources = {};
@@ -320,15 +334,27 @@ async function runIpUpdateTask(env, sources = null) {
                     sources[setting.source] = setting.enabled === 1;
                 });
             } else {
-                sources = { hostmonit: true, vps789: true };
+                sources = { 
+                    hostmonit_v4: true, 
+                    hostmonit_v6: false,  // 默认不开启V6
+                    vps789: true, 
+                    global_enabled: true 
+                };
             }
         } catch (e) {
-            sources = { hostmonit: true, vps789: true };
+            console.error('获取自动更新设置失败，使用默认值:', e.message);
+            sources = { 
+                hostmonit_v4: true, 
+                hostmonit_v6: false,
+                vps789: true, 
+                global_enabled: true 
+            };
         }
     }
 
     const tasks = [];
-    if (sources.hostmonit !== false) tasks.push(fetchIpsFromHostMonit());
+    if (sources.hostmonit_v4 !== false) tasks.push(fetchIpsFromHostMonit('v4'));
+    if (sources.hostmonit_v6 !== false) tasks.push(fetchIpsFromHostMonit('v6'));
     if (sources.vps789 !== false) tasks.push(fetchIpsFromVps789());
 
     if (tasks.length === 0) {
@@ -343,7 +369,22 @@ async function runIpUpdateTask(env, sources = null) {
         .flat();
 
     const uniqueMap = new Map();
-    allIps.forEach(i => { if (i && i.ip) uniqueMap.set(i.ip, i); });
+    allIps.forEach(i => { 
+        if (i && i.ip) {
+            const normalizedIp = i.ip; // IPv6不再需要[]
+            if (uniqueMap.has(normalizedIp)) {
+                const existing = uniqueMap.get(normalizedIp);
+                // 合并来源信息，避免重复
+                if (existing.source && !existing.source.includes(i.source)) {
+                    existing.source = `${existing.source}|${i.source}`;
+                } else if (!existing.source) {
+                    existing.source = i.source;
+                }
+            } else {
+                uniqueMap.set(normalizedIp, { ...i, ip: normalizedIp });
+            }
+        }
+    });
     const uniqueIps = Array.from(uniqueMap.values());
 
     if (uniqueIps.length === 0) {
@@ -351,11 +392,9 @@ async function runIpUpdateTask(env, sources = null) {
     }
 
     try {
-        const globalSetting = await env.DB.prepare(
-            'SELECT enabled FROM auto_update_settings WHERE source = ?'
-        ).bind('global_enabled').first();
+        const globalSetting = sources.global_enabled; // 直接使用从数据库或默认值获取的 global_enabled
         
-        if (globalSetting && globalSetting.enabled === 0) {
+        if (globalSetting === 0) {
             return { 
                 success: true, 
                 count: uniqueIps.length, 
@@ -367,8 +406,8 @@ async function runIpUpdateTask(env, sources = null) {
         await env.DB.prepare('DELETE FROM cfips').run();
         
         const stmts = uniqueIps.map(i =>
-            env.DB.prepare('INSERT INTO cfips (ip, ip_type, carrier, created_at) VALUES (?, ?, ?, ?)')
-                .bind(i.ip, i.ip_type, i.carrier, Date.now())
+            env.DB.prepare('INSERT INTO cfips (ip, ip_type, carrier, source, created_at) VALUES (?, ?, ?, ?, ?)')
+                .bind(i.ip, i.ip_type, i.carrier, i.source, Date.now())
         );
         
         const BATCH_SIZE = 50;
@@ -390,12 +429,39 @@ async function runIpUpdateTask(env, sources = null) {
         };
         
     } catch (e) {
+        console.error('IP更新任务数据库操作失败:', e.message);
         return { success: false, message: "数据库错误: " + e.message };
     }
 }
 
+// 初始化默认自动更新设置 (新增函数)
+async function initializeDatabaseSettings(env) {
+    try {
+        const defaultSettings = [
+            { source: 'global_enabled', enabled: 1, updated_at: Date.now() },
+            { source: 'hostmonit_v4', enabled: 1, updated_at: Date.now() },
+            { source: 'hostmonit_v6', enabled: 0, updated_at: Date.now() }, // 默认不开启IPv6
+            { source: 'vps789', enabled: 1, updated_at: Date.now() },
+            { source: 'last_executed', enabled: 0, updated_at: 0 }
+        ];
+        
+        // 使用 INSERT OR IGNORE 确保只在不存在时插入
+        const stmts = defaultSettings.map(setting =>
+            env.DB.prepare(
+                'INSERT OR IGNORE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)'
+            ).bind(setting.source, setting.enabled, setting.updated_at)
+        );
+        await env.DB.batch(stmts);
+        
+        console.log('数据库设置初始化完成或已存在');
+    } catch (e) {
+        console.error('数据库设置初始化失败:', e.message);
+    }
+}
+
+
 // =================================================================
-//  5. API处理函数
+//  5. API处理函数 (已修改)
 // =================================================================
 
 async function handleLogin(req, env) {
@@ -719,33 +785,49 @@ async function handleMfaRegenerateBackupCodes(req, env, currentUser) {
     }
 }
 
+// 修改handleGetAutoUpdateSettings函数 (已修改)
 async function handleGetAutoUpdateSettings(req, env) {
     try {
         const settings = await env.DB.prepare(
-            'SELECT source, enabled, updated_at FROM auto_update_settings WHERE source IN (?, ?, ?)'
-        ).bind('global_enabled', 'hostmonit', 'vps789').all();
+            'SELECT source, enabled, updated_at FROM auto_update_settings WHERE source IN (?, ?, ?, ?, ?)'
+        ).bind('global_enabled', 'hostmonit_v4', 'hostmonit_v6', 'vps789', 'last_executed').all();
         
-        const result = { global_enabled: 0, hostmonit: 1, vps789: 1 };
+        const result = { 
+            global_enabled: 0, 
+            hostmonit_v4: 1, 
+            hostmonit_v6: 0,  // 默认不开启
+            vps789: 1, 
+            last_executed: 0 
+        };
+        
         if (settings && settings.results) {
             settings.results.forEach(setting => {
-                result[setting.source] = setting.enabled;
+                if (setting.source === 'last_executed') {
+                    result.last_executed = setting.updated_at; // 只有last_executed保存的是时间戳
+                } else {
+                    result[setting.source] = setting.enabled;
+                }
             });
         }
         return jsonResponse(result);
     } catch (error) {
+        console.error('handleGetAutoUpdateSettings error:', error.message);
         return jsonResponse({ error: '服务器错误' }, 500);
     }
 }
 
+// 修改handleSetAutoUpdateSettings函数 (已修改)
 async function handleSetAutoUpdateSettings(req, env) {
     try {
-        const { global_enabled, hostmonit, vps789 } = await req.json();
+        const { global_enabled, hostmonit_v4, hostmonit_v6, vps789 } = await req.json();
         
         const stmts = [
             env.DB.prepare('INSERT OR REPLACE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)')
                 .bind('global_enabled', global_enabled ? 1 : 0, Date.now()),
             env.DB.prepare('INSERT OR REPLACE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)')
-                .bind('hostmonit', hostmonit ? 1 : 0, Date.now()),
+                .bind('hostmonit_v4', hostmonit_v4 ? 1 : 0, Date.now()),
+            env.DB.prepare('INSERT OR REPLACE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)')
+                .bind('hostmonit_v6', hostmonit_v6 ? 1 : 0, Date.now()),
             env.DB.prepare('INSERT OR REPLACE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)')
                 .bind('vps789', vps789 ? 1 : 0, Date.now())
         ];
@@ -756,6 +838,7 @@ async function handleSetAutoUpdateSettings(req, env) {
             message: '自动更新设置已保存'
         });
     } catch (error) {
+        console.error('handleSetAutoUpdateSettings error:', error.message);
         return jsonResponse({ error: '服务器错误' }, 500);
     }
 }
@@ -771,13 +854,15 @@ async function handleGetStats(req, env) {
         const ips = await env.DB.prepare('SELECT COUNT(*) as c FROM cfips').first('c');
         const uuids = await env.DB.prepare('SELECT COUNT(DISTINCT uuid) as c FROM configs').first('c');
         
-        const enabled = await env.DB.prepare(
+        const enabledSetting = await env.DB.prepare(
             'SELECT enabled FROM auto_update_settings WHERE source = ?'
-        ).bind('global_enabled').first('enabled');
+        ).bind('global_enabled').first();
+        const enabled = enabledSetting?.enabled || 0; // If no setting, default to 0 for safety
         
-        const lastExec = await env.DB.prepare(
+        const lastExecSetting = await env.DB.prepare(
             'SELECT updated_at FROM auto_update_settings WHERE source = ?'
-        ).bind('last_executed').first('updated_at');
+        ).bind('last_executed').first();
+        const lastExec = lastExecSetting?.updated_at || 0;
         
         // 获取订阅访问统计
         let accessStats = null;
@@ -796,11 +881,12 @@ async function handleGetStats(req, env) {
             domains: domains || 0, 
             ips: ips || 0, 
             uuids: uuids || 0,
-            autoUpdate: enabled || 0,
-            lastExecuted: lastExec || 0,
+            autoUpdate: enabled,
+            lastExecuted: lastExec,
             access_stats: accessStats
         });
     } catch (error) {
+        console.error('handleGetStats error:', error.message);
         return jsonResponse({ error: '服务器错误' }, 500);
     }
 }
@@ -820,6 +906,7 @@ async function handleGetUUIDAccessDetails(req, env) {
         const details = await getUUIDAccessDetails(env, uuid, startDate, endDate);
         return jsonResponse(details);
     } catch (error) {
+        console.error('handleGetUUIDAccessDetails error:', error.message);
         return jsonResponse({ error: '服务器错误' }, 500);
     }
 }
@@ -890,10 +977,12 @@ async function handleDomains(req, env, method) {
         
         return jsonResponse({ error: '不支持的请求方法' }, 405);
     } catch (error) {
+        console.error('handleDomains error:', error.message);
         return jsonResponse({ error: '服务器错误' }, 500);
     }
 }
 
+// 修改handleIps函数 (已修改)
 async function handleIps(req, env, method) {
     try {
         const url = new URL(req.url);
@@ -904,7 +993,7 @@ async function handleIps(req, env, method) {
             const sortField = url.searchParams.get('sort') || 'created_at';
             const sortOrder = (url.searchParams.get('order') || 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
             
-            const allowedSorts = ['ip', 'ip_type', 'carrier', 'created_at'];
+            const allowedSorts = ['ip', 'ip_type', 'carrier', 'source', 'created_at']; // 增加source
             const actualSort = allowedSorts.includes(sortField) ? sortField : 'created_at';
             const offset = (page - 1) * size;
 
@@ -933,16 +1022,25 @@ async function handleIps(req, env, method) {
         
         return jsonResponse({ error: '不支持的请求方法' }, 405);
     } catch (error) {
+        console.error('handleIps error:', error.message);
         return jsonResponse({ error: '服务器错误' }, 500);
     }
 }
 
+// 修改handleIpsRefresh函数 (已修改)
 async function handleIpsRefresh(req, env) {
     try {
         const body = await req.json().catch(() => ({}));
-        const res = await runIpUpdateTask(env, body);
+        // 使用新的来源名称
+        const sources = {
+            hostmonit_v4: body.hostmonit_v4,
+            hostmonit_v6: body.hostmonit_v6,
+            vps789: body.vps789
+        };
+        const res = await runIpUpdateTask(env, sources);
         return jsonResponse(res);
     } catch (error) {
+        console.error('handleIpsRefresh error:', error.message);
         return jsonResponse({ error: '服务器错误' }, 500);
     }
 }
@@ -986,6 +1084,7 @@ async function handleUuids(req, env, method) {
         
         return jsonResponse({ error: '不支持的请求方法' }, 405);
     } catch (error) {
+        console.error('handleUuids error:', error.message);
         return jsonResponse({ error: '服务器错误' }, 500);
     }
 }
@@ -1091,7 +1190,7 @@ async function handleApi(req, env) {
 }
 
 // =================================================================
-//  7. HTML模板
+//  7. HTML模板 (已修改)
 // =================================================================
 
 const globalCss = `
@@ -1132,7 +1231,7 @@ select.page-size { padding: 4px; border: 1px solid #89949B; border-radius: 4px; 
 .footer { margin-top: auto; padding-top: 40px; color: #89949B; font-size: 0.8rem; text-align: center; width: 100%; border-top: 1px solid #f0f0f0; }
 .footer a { color: #5a666d; text-decoration: none; }
 .footer a:hover { text-decoration: underline; }
-.switch-group { display: flex; gap: 20px; align-items: center; margin-bottom: 15px; background: #e8ebed; padding: 10px 15px; border-radius: 4px; }
+.switch-group { display: flex; flex-wrap: wrap; gap: 20px; align-items: center; margin-bottom: 15px; background: #e8ebed; padding: 10px 15px; border-radius: 4px; }
 .switch-label { font-weight: 500; color: #5a666d; display: flex; align-items: center; gap: 8px;}
 .switch { position: relative; display: inline-block; width: 40px; height: 22px; }
 .switch input { opacity: 0; width: 0; height: 0; }
@@ -1680,15 +1779,21 @@ const adminHtml = `
                 </div>
                 
                 <div class="switch-group">
-                    <label class="switch-label">启用自动更新
+                    <label class="switch-label">主开关
                         <div class="switch">
                             <input type="checkbox" id="sw-global" checked>
                             <span class="slider"></span>
                         </div>
                     </label>
-                    <label class="switch-label">HostMonit接口
+                    <label class="switch-label">HostMonit IPv4接口
                         <div class="switch">
-                            <input type="checkbox" id="sw-hm" checked>
+                            <input type="checkbox" id="sw-hm-v4" checked>
+                            <span class="slider"></span>
+                        </div>
+                    </label>
+                    <label class="switch-label">HostMonit IPv6接口
+                        <div class="switch">
+                            <input type="checkbox" id="sw-hm-v6">
                             <span class="slider"></span>
                         </div>
                     </label>
@@ -1709,6 +1814,7 @@ const adminHtml = `
                                 <th onclick="sortIp('ip')">IP 地址 ↕</th>
                                 <th onclick="sortIp('ip_type')">类型 ↕</th>
                                 <th onclick="sortIp('carrier')">运营商 ↕</th>
+                                <th onclick="sortIp('source')">来源 ↕</th> <!-- 新增加的列 -->
                                 <th onclick="sortIp('created_at')">入库时间 ↕</th>
                                 <th>操作</th>
                             </tr>
@@ -1800,7 +1906,7 @@ const adminHtml = `
             </div>
             <div style="display:flex; justify-content:flex-end; gap:10px;">
                 <button class="nav-btn" onclick="document.getElementById('pwdModal').style.display='none'">取消</button>
-                <button class="nav-btn active" onclick="changePwd()">确认修改</button>
+                                <button class="nav-btn active" onclick="changePwd()">确认修改</button>
             </div>
         </div>
     </div>
@@ -2012,7 +2118,8 @@ const adminHtml = `
         let domState = { page: 1, size: 10, total: 0, sort: 'id', order: 'desc' };
         let ipState = { page: 1, size: 20, total: 0, sort: 'created_at', order: 'desc' };
         let uuidState = { page: 1, size: 10, total: 0, sort: 'updated_at', order: 'desc' };
-        let autoUpdateSettings = { global_enabled: false, hostmonit: true, vps789: true };
+        // 更新 autoUpdateSettings 默认值，增加 hostmonit_v6
+        let autoUpdateSettings = { global_enabled: false, hostmonit_v4: true, hostmonit_v6: false, vps789: true };
         let mfaStatus = { enabled: false, last_login: 0, backup_codes: 0 };
         let currentMfaSecret = '';
         let accessChart = null;
@@ -2026,7 +2133,9 @@ const adminHtml = `
             }
             
             try {
-                await init();
+                // 在前端初始化时也加载默认设置 (确保数据库有这些记录)
+                // 实际在 Worker 启动时调用 initializeDatabaseSettings 更好
+                await init(); 
             } catch (error) {
                 document.getElementById('loader').innerHTML = \`
                     <div style="text-align:center; color:#ef4444;">
@@ -2328,14 +2437,15 @@ const adminHtml = `
             }
         }
 
-        // ============ 自动更新设置 ============
+        // ============ 自动更新设置 (已修改) ============
         async function loadAutoUpdateSettings() {
             const settings = await api('settings/auto-update');
             if (settings) {
                 autoUpdateSettings = settings;
                 
                 document.getElementById('sw-global').checked = settings.global_enabled === 1;
-                document.getElementById('sw-hm').checked = settings.hostmonit === 1;
+                document.getElementById('sw-hm-v4').checked = settings.hostmonit_v4 === 1;
+                document.getElementById('sw-hm-v6').checked = settings.hostmonit_v6 === 1; // 新增 IPv6 开关
                 document.getElementById('sw-v7').checked = settings.vps789 === 1;
                 
                 const indicator = document.getElementById('globalStatusIndicator');
@@ -2353,12 +2463,14 @@ const adminHtml = `
 
         async function saveAutoUpdateSettings() {
             const globalEnabled = document.getElementById('sw-global').checked;
-            const hostmonitEnabled = document.getElementById('sw-hm').checked;
+            const hostmonitV4Enabled = document.getElementById('sw-hm-v4').checked;
+            const hostmonitV6Enabled = document.getElementById('sw-hm-v6').checked; // 获取 IPv6 开关状态
             const vps789Enabled = document.getElementById('sw-v7').checked;
             
             const res = await api('settings/auto-update', 'POST', {
                 global_enabled: globalEnabled,
-                hostmonit: hostmonitEnabled,
+                hostmonit_v4: hostmonitV4Enabled,
+                hostmonit_v6: hostmonitV6Enabled, // 提交 IPv6 开关状态
                 vps789: vps789Enabled
             });
             
@@ -2417,7 +2529,8 @@ const adminHtml = `
             const mfaStatusContent = document.getElementById('mfaStatusContent');
             const enableMfaBtn = document.getElementById('enableMfaBtn');
             const disableMfaBtn = document.getElementById('disableMfaBtn');
-            
+            const setupSteps = document.getElementById('mfaSetupSteps');
+
             if (mfaStatus.enabled) {
                 const lastLogin = mfaStatus.last_login ? 
                     fmtDate(mfaStatus.last_login) : '从未';
@@ -2440,6 +2553,8 @@ const adminHtml = `
                 
                 enableMfaBtn.style.display = 'none';
                 disableMfaBtn.style.display = 'inline-block';
+                setupSteps.style.display = 'none'; // 确保禁用时隐藏设置步骤
+                setupSteps.innerHTML = '';
             } else {
                 mfaStatusContent.innerHTML = \`
                     <div style="color:#ef4444; font-weight:bold; margin-bottom:10px;">
@@ -2722,6 +2837,10 @@ const adminHtml = `
         // ============ Modal控制函数 ============
         function openPwdModal() {
             document.getElementById('pwdModal').style.display = 'flex';
+            document.getElementById('oldP').value = '';
+            document.getElementById('newP').value = '';
+            document.getElementById('confirmP').value = '';
+            setTimeout(()=>document.getElementById('oldP').focus(), 100);
         }
 
         // 打开一个统一风格的验证密码弹窗，回调在确认后执行
@@ -2834,6 +2953,7 @@ const adminHtml = `
             document.getElementById('editDomain').value = domain; 
             document.getElementById('editRemark').value = remark; 
             document.getElementById('editDomModal').style.display = 'flex'; 
+            setTimeout(()=>document.getElementById('editDomain').focus(), 100);
         }
         
         async function updateDomain() {
@@ -2852,25 +2972,55 @@ const adminHtml = `
         function changeDomSize() { changeSize('dom', domState, loadDom); }
         function sortDom(f) { changeSort(f, domState, loadDom); }
 
-        // ============ IP管理 ============
+        // ============ IP管理 (已修改) ============
         async function loadIp() {
             const q = \`ips?page=\${ipState.page}&size=\${ipState.size}&sort=\${ipState.sort}&order=\${ipState.order}\`;
             const d = await api(q);
             if(d && d.data) {
                 let h = '';
-                d.data.forEach(i => h += \`<tr><td>\${i.ip}</td><td>\${i.ip_type}</td><td>\${i.carrier}</td><td>\${fmtDate(i.created_at)}</td><td><button class="nav-btn danger small" onclick="delI('\${i.ip}')">删除</button></td></tr>\`);
-                document.getElementById('ipList').innerHTML = h || '<tr><td colspan="5" style="text-align:center">无数据</td></tr>';
+                d.data.forEach(i => {
+                    // 格式化来源显示
+                    let sourceDisplay = (i.source || 'unknown').split('|').map(s => {
+                        if (s === 'hostmonit_v4') return 'HostMonit IPv4';
+                        if (s === 'hostmonit_v6') return 'HostMonit IPv6';
+                        if (s === 'vps789') return 'Vps789';
+                        return s;
+                    }).join(' | ');
+
+                    h += \`<tr>
+                        <td>\${i.ip}</td>
+                        <td>\${i.ip_type}</td>
+                        <td>\${i.carrier}</td>
+                        <td>\${sourceDisplay}</td> <!-- 显示来源 -->
+                        <td>\${fmtDate(i.created_at)}</td>
+                        <td><button class="nav-btn danger small" onclick="delI('\${i.ip}')">删除</button></td>
+                    </tr>\`;
+                });
+                document.getElementById('ipList').innerHTML = h || '<tr><td colspan="6" style="text-align:center">无数据</td></tr>'; // 调整 colspan
                 ipState.total = d.total;
                 updatePager('ip', ipState);
             }
         }
         
         async function refreshIps() {
-            const hm = document.getElementById('sw-hm').checked; 
+            const globalEnabled = document.getElementById('sw-global').checked;
+            const hmV4 = document.getElementById('sw-hm-v4').checked; 
+            const hmV6 = document.getElementById('sw-hm-v6').checked; // 获取 IPv6 开关状态
             const v7 = document.getElementById('sw-v7').checked;
+
+            if (!globalEnabled) {
+                toast('自动更新主开关已禁用，无法执行立即更新', 'warning');
+                return;
+            }
+            if (!hmV4 && !hmV6 && !v7) {
+                toast('请至少启用一个 IP 来源接口！', 'error');
+                return;
+            }
+
             toast('IP更新任务已开始...', 'info');
             const res = await api('ips/refresh', 'POST', { 
-                hostmonit: hm, 
+                hostmonit_v4: hmV4, 
+                hostmonit_v6: hmV6, // 提交 IPv6 开关状态
                 vps789: v7 
             });
             if(res && res.success) { 
@@ -2884,7 +3034,7 @@ const adminHtml = `
         }
         
         async function delI(ip) { 
-            if(confirm('删除此 IP?')) { 
+            if(confirm('确认删除此 IP?')) { 
                 await api('ips', 'DELETE', {ip}); 
                 loadIp(); 
             } 
@@ -2892,7 +3042,7 @@ const adminHtml = `
         
         function changeIpPage(d) { changePage('ip', d, ipState, loadIp); }
         function changeIpSize() { changeSize('ip', ipState, loadIp); }
-        function sortIp(f) { changeSort(f, ipState, loadIp); }
+        function sortIp(f) { changeSort(f, ipState, loadIp); } // sortIp 已支持 'source'
 
         // ============ UUID管理 ============
         async function loadUuid() {
@@ -2908,7 +3058,7 @@ const adminHtml = `
         }
         
         async function delU(u) { 
-            if(confirm('确认删除?')) { 
+            if(confirm('确认删除此 UUID 分组? 这将删除所有关联配置。')) { 
                 await api('uuids', 'DELETE', {uuid:u}); 
                 loadUuid(); 
             } 
@@ -2973,7 +3123,10 @@ const adminHtml = `
             // Ctrl+S保存自动更新设置
             if (e.ctrlKey && e.key === 's') {
                 e.preventDefault();
-                saveAutoUpdateSettings();
+                const currentActiveCard = document.querySelector('.card.active');
+                if (currentActiveCard && currentActiveCard.id === 'ips') {
+                    saveAutoUpdateSettings();
+                }
             }
         });
     </script>
@@ -2989,6 +3142,9 @@ export default {
     async fetch(request, env, ctx) {
         const url = new URL(request.url);
         
+        // Ensure database settings are initialized on first access or cold start
+        ctx.waitUntil(initializeDatabaseSettings(env));
+
         // 处理API请求
         if (url.pathname.startsWith('/api')) {
             return await handleApi(request, env);
@@ -3005,12 +3161,8 @@ export default {
         }
         
         // 默认返回管理页面
-        const adminToken = request.headers.get('Cookie')?.match(/admin_token=([^;]+)/)?.[1];
-        if (!adminToken && !url.pathname.endsWith('.ico') && !url.pathname.endsWith('.css')) {
-            // 如果用户可能已经登录，检查localStorage token
-            // 这里我们直接返回页面，让前端JavaScript处理重定向
-        }
-        
+        // 注意：这里的Admin页面返回逻辑应该由前端JS处理token验证和重定向，
+        // Worker只负责提供HTML。
         return new Response(adminHtml, { 
             headers: { 
                 'Content-Type': 'text/html;charset=UTF-8',
@@ -3022,6 +3174,7 @@ export default {
     async scheduled(event, env, ctx) {
         ctx.waitUntil((async () => {
             console.log('定时IP更新任务开始执行');
+            await initializeDatabaseSettings(env); // 确保定时任务前设置已初始化
             try {
                 await runIpUpdateTask(env);
                 console.log('定时IP更新任务完成');
@@ -3031,3 +3184,4 @@ export default {
         })());
     }
 };
+

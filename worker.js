@@ -234,10 +234,14 @@ function replaceAddressesInConfigs(baseConfigsToProcess, addressList) {
     const validAddressRegex = /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[[0-9a-fA-F:\.]+\]|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})$/;
 
     for (const baseConfig of baseConfigsToProcess) {
+        // 先添加原始配置
+        generatedConfigs.push(baseConfig);
+        
         let configType = getProtocol(baseConfig);
         let processedBaseConfig;
         const pushError = (msg) => generatedConfigs.push(`[错误] ${msg}`);
 
+        // 只处理 vmess, vless, trojan 协议
         if (configType === 'trojan' || configType === 'vless') {
             const addressMatch = baseConfig.match(addressExtractionRegex);
             if (!addressMatch) {
@@ -259,32 +263,44 @@ function replaceAddressesInConfigs(baseConfigsToProcess, addressList) {
                 continue;
             }
         } else {
-            pushError(`不支持的类型，已跳过。`);
+            pushError(`不支持的类型: ${configType}，已跳过。`);
             continue;
         }
 
-        for (const newAddr of addressList) {
-            if (!validAddressRegex.test(newAddr) && !newAddr.includes(':')) {
-                // simple validation
-            }
-            const cleanAddrForName = newAddr.replace(/[\[\]]/g, '');
+            for (const newAddr of addressList) {
+                if (!validAddressRegex.test(newAddr) && !newAddr.includes(':')) {
+                    // simple validation
+                }
+                const cleanAddrForName = newAddr.replace(/[\[\]]/g, '');
+                
+                // 处理IPv6地址格式
+                let formattedAddr = newAddr;
+                if (newAddr.includes(':') && !newAddr.startsWith('[') && !newAddr.endsWith(']')) {
+                    formattedAddr = `[${newAddr}]`;
+                }
 
-            if (configType === 'trojan' || configType === 'vless') {
-                try {
-                    const url = new URL(processedBaseConfig);
-                    const originalName = url.hash ? decodeURIComponent(url.hash.substring(1)) : `${configType}-node`;
-                    const newName = `${originalName}-${cleanAddrForName}`;
-                    url.hash = encodeURIComponent(newName);
-                    url.hostname = newAddr; 
+                if (configType === 'trojan' || configType === 'vless') {
+                    try {
+                        const url = new URL(processedBaseConfig);
+                        const originalName = url.hash ? decodeURIComponent(url.hash.substring(1)) : `${configType}-node`;
+                        const newName = `${originalName}-${cleanAddrForName}`;
+                        url.hash = encodeURIComponent(newName);
+                        url.hostname = formattedAddr; 
                     generatedConfigs.push(url.toString());
                 } catch (e) {
                     pushError(`处理 ${configType} 出错: ${e.message}`);
                 }
-            } else if (configType === 'vmess') {
-                const tempVmessObj = JSON.parse(JSON.stringify(processedBaseConfig));
-                const originalName = tempVmessObj.ps || tempVmessObj.remark || 'vmess-node';
-                tempVmessObj.ps = `${originalName}-${cleanAddrForName}`;
-                tempVmessObj.add = newAddr; 
+                } else if (configType === 'vmess') {
+                    const tempVmessObj = JSON.parse(JSON.stringify(processedBaseConfig));
+                    const originalName = tempVmessObj.ps || tempVmessObj.remark || 'vmess-node';
+                    tempVmessObj.ps = `${originalName}-${cleanAddrForName}`;
+                    
+                    // 处理IPv6地址格式
+                    let formattedAddr = newAddr;
+                    if (newAddr.includes(':') && !newAddr.startsWith('[') && !newAddr.endsWith(']')) {
+                        formattedAddr = `[${newAddr}]`;
+                    }
+                    tempVmessObj.add = formattedAddr; 
                 if (tempVmessObj.remark) delete tempVmessObj.remark;
 
                 try {
