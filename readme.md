@@ -112,86 +112,67 @@
 进入 D1 数据库的 "Console" 标签页，执行以下 SQL 语句以创建所需的表结构：
 
 ```sql
-/* =================================================================
- *  D1 数据库建表 Schema (v2.1.1更新)
- * ================================================================= */
+admin_users
+├── id (PK)
+├── username
+├── password_hash
+├── mfa_enabled
+├── mfa_secret
+└── ...
 
--- 用户表
-CREATE TABLE IF NOT EXISTS admin_users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE,
-    password_hash TEXT,
-    mfa_enabled INTEGER DEFAULT 0, -- 增加MFA字段
-    mfa_secret TEXT,             -- 增加MFA密钥字段
-    last_mfa_login INTEGER DEFAULT 0, -- 增加MFA上次登录时间
-    last_backup_login INTEGER DEFAULT 0 -- 增加备份码上次登录时间
-);
--- 域名表
-CREATE TABLE IF NOT EXISTS cf_domains (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    domain TEXT UNIQUE,
-    remark TEXT,
-    created_at INTEGER
-);
--- UUID 配置表
-CREATE TABLE IF NOT EXISTS configs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    uuid TEXT,
-    config TEXT, 
-    created_at INTEGER
-);
--- IP 池表 (v2.1更新：新增source字段)
-CREATE TABLE IF NOT EXISTS cfips (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ip TEXT UNIQUE,
-    ip_type TEXT,
-    carrier TEXT,
-    source TEXT DEFAULT 'unknown', -- 新增IP来源字段
-    created_at INTEGER
-);
--- 自动更新设置表 (v1.3新增, v2.1更新：新增hostmonit_v4/hostmonit_v6等)
-CREATE TABLE IF NOT EXISTS auto_update_settings (
-    source TEXT PRIMARY KEY,
-    enabled INTEGER NOT NULL,
-    updated_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000)
-);
+mfa_backup_codes
+├── id (PK)
+├── username (FK → admin_users.username)
+├── code
+└── ...
 
--- MFA 备份码表 (v1.4新增)
-CREATE TABLE IF NOT EXISTS mfa_backup_codes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT NOT NULL, -- 更改为username以便直接关联
-    code TEXT NOT NULL,
-    used INTEGER DEFAULT 0,
-    created_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000),
-    used_at INTEGER DEFAULT 0
-);
+cf_domains
+├── id (PK)
+├── domain
+└── ...
 
--- 访问日志表 (v2.0新增)
-CREATE TABLE IF NOT EXISTS config_access_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    uuid TEXT NOT NULL,
-    query_type TEXT NOT NULL,  -- 记录类型: 'subscription' 或 'api-generation'
-    client_ip TEXT,
-    user_agent TEXT,
-    created_at TEXT DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%SZ', 'now'))
-);
+configs
+├── id (PK)
+├── uuid
+├── config
+└── ...
 
--- 为访问日志添加索引以优化查询性能
-CREATE INDEX IF NOT EXISTS idx_access_logs_uuid ON config_access_logs(uuid);
-CREATE INDEX IF NOT EXISTS idx_access_logs_date ON config_access_logs(created_at);
-CREATE INDEX IF NOT EXISTS idx_access_logs_type ON config_access_logs(query_type);
+cfips
+├── id (PK)
+├── ip
+├── ip_type
+├── carrier
+├── source
+└── ...
 
--- 初始化管理员 (账号: admin / 密码: password)
--- Hash 值是 "password" 的 SHA-256
-INSERT INTO admin_users (username, password_hash, mfa_enabled) VALUES ('admin', '5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8', 0) ON CONFLICT(username) DO NOTHING;
+auto_update_settings
+├── source (PK)
+├── enabled
+└── ...
 
--- 初始化自动更新设置 (v1.3新增, v2.1更新了来源键名)
-INSERT OR IGNORE INTO auto_update_settings (source, enabled) VALUES 
-('global_enabled', 1),
-('hostmonit_v4', 1),
-('hostmonit_v6', 0), -- 默认不开启IPv6
-('vps789', 1),
-('last_executed', 0); -- 记录上次执行时间戳
+config_access_logs
+├── id (PK)
+├── uuid
+├── query_type
+├── client_ip
+└── ...
+
+system_logs
+├── id (PK)
+├── username
+├── action
+└── ...
+
+api_access_stats
+├── id (PK)
+├── endpoint
+├── method
+└── ...
+
+视图:
+├── daily_access_stats
+└── popular_configs
+
 ```
 
 ### 3. 创建四个Worker并绑定D1
