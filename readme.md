@@ -1,4 +1,4 @@
-# Cloudflare Worker: 代理配置优选工具
+# Cloudflare Worker: 代理配置优选工具 (v2.1.1更新)
 
 ![JavaScript](https://img.shields.io/badge/JavaScript-ES6+-yellow?logo=javascript&logoColor=white) ![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)![D1 Database](https://img.shields.io/badge/Cloudflare-D1-0052CC?logo=cloudflare&logoColor=white)  ![MIT License](https://img.shields.io/badge/License-MIT-green.svg) ![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=node.js&logoColor=white)  ![Chart.js](https://img.shields.io/badge/Chart.js-4.0+-FF6384?logo=chart.js&logoColor=white) ![Version](https://img.shields.io/badge/Version−2.1.1-blue.svg)
 
@@ -24,29 +24,36 @@
 *   **`mg_worker.js`** - 管理后台：JWT 认证、域名/IP/UUID 管理、系统统计、手动 IP 更新代理、订阅访问统计分析
 *   **`ip-worker.js`** - IP管理服务：专门处理IP更新任务，支持定时更新和手动更新接口，与mg_worker.js共享数据库
 
-### 2. **双模式优选**
+### 2. **协议支持扩展 [v2.1.1更新]**
+
+*   **扩展协议支持**：在原有 VMess、VLESS、Trojan 协议基础上，增加对更多主流代理协议的支持，包括 Shadowsocks (ss)、ShadowsocksR (ssr) 等
+*   **统一解析架构**：所有协议都集成到统一的解析器中，支持标准格式的协议链接
+*   **向下兼容**：原有协议配置保持完全兼容，新协议可无缝集成到配置管理系统
+
+### 3. **双模式优选**
 
 *   支持将配置中的地址批量替换为 **优选 IP** 或 **优选域名**
 *   **支持 IPv4/IPv6** 和不同运营商（电信/联通/移动）筛选
 *   **IP 资源池增加了 IP 来源显示**（如：HostMonit IPv4, HostMonit IPv6, Vps789）
 *   支持通过管理后台手动更新 IP 数据源（代理到ip-worker.js服务）
 
-### 3. **配置管理 (CRUD) [v1.2]**
+### 4. **配置管理 (CRUD) [v1.2]**
 
-*   提供完整的管理界面，可添加、查询、编辑、删除基础配置（支持 VMess, VLESS, Trojan）
+*   提供完整的管理界面，可添加、查询、编辑、删除基础配置（支持 VMess, VLESS, Trojan, Shadowsocks 等）
 *   按 UUID 分组管理，方便生成不同的订阅
 *   支持配置编辑功能，可修改别名、地址、端口、传输协议等参数
+*   **编辑配置即时返回 [v2.1.1更新]**：修改配置后，API接口会立即返回更新后的完整配置对象，前端无需重新查询即可更新界面显示
 *   提供配置生成器外部链接（"配置生成"按钮），链接到外部配置生成器（https://cfst.api.yangzifun.org）
 *   改进的订阅链接显示方式（使用可复制的输入框）
 *   统一的前端按钮样式
 
-### 4. **动态订阅生成**
+### 5. **动态订阅生成**
 
 *   提供 `/sub/{uuid}` 订阅接口，返回 Base64 编码的配置列表
 *   支持通过 URL 参数动态指定 IP 类型（IPv4/IPv6）或运营商（电信/联通/移动）
 *   支持批量添加配置，提高管理效率
 
-### 5. **访问日志记录 [v2.0新增]**
+### 6. **访问日志记录 [v2.0新增]**
 
 *   **完整的访问统计**：记录用户通过UUID生成配置的所有访问
 *   **双模式记录**：
@@ -56,7 +63,7 @@
 *   **实时统计API**：提供`/stats`接口获取详细的访问统计数据
 *   **汇总分析**：支持按日期、UUID、访问类型进行多维度统计
 
-### 6. **订阅分析功能 [v2.0新增]**
+### 7. **订阅分析功能 [v2.0新增]**
 
 *   **管理后台订阅分析**：在管理后台提供全局访问分析
 *   **配置页面UUID统计**：在配置管理页面为每个UUID提供专属统计图表
@@ -67,7 +74,7 @@
 *   **实时数据更新**：支持手动刷新统计数据
 *   **详细访问记录**：显示最近访问记录和客户端信息
 
-### 7. **完整的数据管理**
+### 8. **完整的数据管理**
 
 *   域名管理：添加、编辑、删除优选域名
 *   **IP 资源池管理**：查看、删除、刷新优选 IP，**支持 HostMonit IPv6 接口开启/关闭，并显示 IP 来源**
@@ -75,7 +82,7 @@
 *   系统统计：实时查看域名、IP、UUID 数量统计
 *   **IP更新职责分离**：IP更新任务由专门的ip-worker.js处理，管理后台仅作为代理
 
-### 8. **安全特性**
+### 9. **安全特性**
 
 *   JWT 认证系统，保障管理后台安全
 *   **MFA双重验证 [v1.4新增]**：
@@ -245,7 +252,7 @@ INSERT INTO cf_domains (domain, remark, created_at) VALUES
 ### 1. 首页 (批量生成器)
 
 *   **基础配置**：
-    *   **手动粘贴**：直接将 vmess/vless 链接粘贴到文本框。
+    *   **手动粘贴**：直接将 vmess/vless/trojan/ss/ssr 等链接粘贴到文本框。
     *   **从 UUID 获取**：输入在管理页保存的 UUID，脚本会自动拉取该组所有配置。
 *   **优选列表**：
     *   **IP 地址**：选择 IPv4/IPv6 或特定运营商。支持 HostMonit IPv4/IPv6 及 Vps789 等多个来源的 IP 数据。如果 IP 池为空，请在管理后台的 **"IP 资源池管理"** 中，点击 **"立即更新"** 按钮手动获取 IP。
@@ -256,7 +263,8 @@ INSERT INTO cf_domains (domain, remark, created_at) VALUES
 ### 2. 配置管理页 (`config.example.com`)
 
 *   在此页面，您可以：
-    *   **管理基础配置**：添加/查询/删除节点配置
+    *   **管理基础配置**：添加/查询/删除节点配置（**v2.1.1新增更多协议支持**）
+    *   **即时编辑反馈**：编辑配置保存后，列表会立即更新，无需重新查询（**v2.1.1新增**）
     *   **查看 UUID 统计**：为当前查询的 UUID 显示访问统计图表
     *   **添加新配置**：批量添加新的配置节点
 *   **操作指南**：
@@ -265,13 +273,14 @@ INSERT INTO cf_domains (domain, remark, created_at) VALUES
         -   **点击查询**：查看该UUID下的所有配置
     2.  在"配置列表"卡片：
         -   **编辑配置**：点击编辑按钮修改配置参数
+        -   **保存编辑**：保存后界面立即显示最新配置内容
         -   **删除配置**：删除单个配置或整个UUID组
     3.  在"访问统计"卡片：
         -   **查看趋势图**：选择时间范围（7/14/30/60天）查看访问趋势
         -   **切换图表类型**：查看总访问量或分类统计
         -   **查看访问记录**：查看最近的访问记录和客户端信息
     4.  在"添加新节点"卡片：
-        -   **批量添加配置**：支持vmess/vless/trojan链接批量添加
+        -   **批量添加配置**：支持多种协议链接批量添加
 
 ### 3. 管理后台 (`mg.example.com`)
 
@@ -291,6 +300,7 @@ INSERT INTO cf_domains (domain, remark, created_at) VALUES
 
 *   **IP 模式**: `proxy.example.com/batch-configs/{uuid}?type=ip&ipType=v4&carrier=CT`
 *   **域名 模式**: `proxy.example.com/batch-configs/{uuid}?type=domain`
+*   **协议扩展**：支持所有已配置的协议类型
 
 ---
 
@@ -325,6 +335,10 @@ sequenceDiagram
     Config->>DB: 获取访问统计
     Config-->>User: 返回配置列表和统计图表
 
+    User->>Config: 编辑配置并保存 (v2.1.1新增)
+    Config->>DB: 更新配置
+    Config-->>User: 立即返回更新后的配置对象
+  
     User->>Mg: 点击"立即更新IP"
     Mg->>DB: 保存自动更新设置
     Mg->>IP: 代理调用 /api/ips/update
@@ -383,15 +397,15 @@ sequenceDiagram
 
 ### config_worker.js 接口 (v2.0+)：
 
-| 方法     | 路径                    | 描述             | 参数示例                                                |
-| :------- | :---------------------- | :--------------- | :------------------------------------------------------ |
-| `GET`    | `/api/configs/:uuid`    | 获取UUID配置列表 | -                                                       |
-| `POST`   | `/api/configs`          | 批量添加配置     | JSON body (vmess/vless/trojan链接列表)                  |
-| `PUT`    | `/api/configs`          | 更新单个配置     | `{"id":123, "config":"vmess://..."}` (仅更新config字段) |
-| `DELETE` | `/api/configs`          | 删除指定UUID组   | `{"uuid":"some_uuid"}`                                  |
-| `DELETE` | `/api/configs/id/:id`   | 删除单个配置     | -                                                       |
-| `GET`    | `/api/stats/uuid/:uuid` | 获取UUID访问统计 | `?days=30` (默认30天)                                   |
-| `POST`   | `/api/access_log`       | 记录访问日志     | `{"uuid":"...", "query_type":"subscription", ...}`      |
+| 方法     | 路径                    | 描述             | 参数示例                                                     |
+| :------- | :---------------------- | :--------------- | :----------------------------------------------------------- |
+| `GET`    | `/api/configs/:uuid`    | 获取UUID配置列表 | -                                                            |
+| `POST`   | `/api/configs`          | 批量添加配置     | JSON body (vmess/vless/trojan/ss/ssr等链接列表)              |
+| `PUT`    | `/api/configs`          | 更新单个配置     | `{"id":123, "config":"vmess://..."}` **(v2.1.1更新：返回完整配置对象)** |
+| `DELETE` | `/api/configs`          | 删除指定UUID组   | `{"uuid":"some_uuid"}`                                       |
+| `DELETE` | `/api/configs/id/:id`   | 删除单个配置     | -                                                            |
+| `GET`    | `/api/stats/uuid/:uuid` | 获取UUID访问统计 | `?days=30` (默认30天)                                        |
+| `POST`   | `/api/access_log`       | 记录访问日志     | `{"uuid":"...", "query_type":"subscription", ...}`           |
 
 ### 统计接口说明
 
@@ -515,67 +529,32 @@ sequenceDiagram
 
 ### 自动更新设置接口说明
 
--   **获取自动更新设置** (`GET /api/settings/auto-update`): 
-    返回当前自动更新配置，包括每个数据源 (`global_enabled`, `hostmonit_v4`, `hostmonit_v6`, `vps789`) 的启用状态，以及 `last_executed` 时间戳。
+- **获取自动更新设置** (`GET /api/settings/auto-update`): 
+  返回当前自动更新配置，包括每个数据源 (`global_enabled`, `hostmonit_v4`, `hostmonit_v6`, `vps789`) 的启用状态，以及 `last_executed` 时间戳。
 
--   **更新自动更新设置** (`POST /api/settings/auto-update`): 
-    更新自动更新配置。请求体为JSON格式，示例：
+- **更新自动更新设置** (`POST /api/settings/auto-update`): 
+  更新自动更新配置。请求体为JSON格式，示例：
 
-    ```json
-    { 
-      "global_enabled": true, 
-      "hostmonit_v4": true,
-      "hostmonit_v6": false, 
-      "vps789": true 
-    }
-    ```
+  ```json
+  { 
+    "global_enabled": true, 
+    "hostmonit_v4": true,
+    "hostmonit_v6": false, 
+    "vps789": true 
+  }
+  ```
 
 ---
-
-## ⚠️ 注意事项
-
-1.  **文件分工**：
-    *   `worker.js` 处理优选逻辑和订阅生成，新增访问日志记录功能
-    *   `config_worker.js` 专注配置管理 CRUD 操作和UUID统计
-    *   `mg_worker.js` 处理系统管理、JWT认证和统计分析
-    *   `ip-worker.js` 专门处理IP更新任务，支持定时和手动更新
-
-2.  **IP 更新 [v2.1.1更新]**：
-    *   IP更新功能已从`mg_worker.js`分离到独立的`ip-worker.js`
-    *   管理后台的"立即更新"按钮会调用`mg_worker.js`的代理接口，然后由`mg_worker.js`调用`ip-worker.js`执行实际更新
-    *   `ip-worker.js`支持定时自动更新和手动触发更新
-    *   支持全局开关和按接口源（**HostMonit IPv4**、**HostMonit IPv6**、**Vps789**）单独配置。
-    *   **IP 池中的 IP 数据现在会记录其原始来源**（例如 `hostmonit_v4`、`hostmonit_v6`、`vps789`）。
-    *   **IPv6 地址在存储时不再额外添加 `[]` 符号。**
-    *   确保`ip-worker.js`部署在独立的域名上，并在`mg_worker.js`中正确配置`IP_WORKER_DOMAIN`
-
-3.  **域名管理**：
-    *   通过 SQL 命令维护 `cf_domains` 表：`INSERT INTO cf_domains (domain, remark) VALUES ('example.com', '优质域名')`
-    *   支持在管理后台(`mg.example.com`)直接管理域名（v1.2+新功能）
-
-4.  **访问日志与统计**：
-    *   仅记录通过UUID生成配置的访问，手动粘贴配置不记录
-    *   访问日志异步记录，不影响主业务流程
-    *   包含客户端IP和User-Agent信息，可用于安全分析
-    *   统计分析数据基于访问日志表，支持多维度查询
-    *   需要在`config_access_logs`表中创建索引以优化查询性能
-
-5.  **VMess 格式**：代码仅支持标准的 JSON 格式 Base64 编码的 VMess 链接。
-
-6.  **配置同步**：通过 `config_worker.js` 管理的配置会实时同步到 D1 数据库。
-
-7.  **图表依赖**：订阅分析功能使用Chart.js库，需要联网加载CDN资源。
-
-8.  **共享数据库**：四个Worker使用同一个D1数据库，确保数据一致性。
 
 ## 📊 版本更新历史
 
 ### v2.1.1 (最新)
 
--   **IP更新功能分离**：将IP更新功能从`mg_worker.js`分离到独立的`ip-worker.js`
--   **四Worker架构**：系统现在由四个Worker组成，职责更清晰
--   **代理调用机制**：管理后台"立即更新"按钮通过代理调用ip-worker.js服务
--   **保持向后兼容**：所有接口保持不变，仅内部实现调整
+-   **协议扩展支持**：在原有 VMess、VLESS、Trojan 协议基础上，增加对 Shadowsocks (ss)、ShadowsocksR (ssr) 等更多主流代理协议的支持
+-   **配置编辑即时反馈**：优化 `config_worker.js` 的 `PUT /api/configs` 接口，编辑配置并保存后，API接口立即返回更新后的完整配置对象，前端无需重新查询即可更新界面显示
+-   **协议解析器增强**：更新配置解析逻辑，支持更多协议的标准格式解析
+-   **用户体验优化**：配置管理页面编辑操作更加流畅，减少不必要的数据刷新
+-   **保持向后兼容**：所有现有接口和功能保持完全兼容，仅进行功能增强
 
 ### v2.1
 
@@ -628,7 +607,7 @@ sequenceDiagram
 2.  **IP优选服务**：为代理提供优化的Cloudflare IP和域名
 3.  **订阅服务分发**：通过UUID分组为不同用户提供定制订阅
 4.  **使用情况分析**：通过统计分析了解配置的使用情况和热度
-5.  **多管理员协作**：支持多管理员通过JWT认证管理配置
+5.  **多协议支持**：支持多种主流代理协议的统一管理（VMess, VLESS, Trojan, Shadowsocks, ShadowsocksR等）
 
 ## 🔧 技术栈
 
@@ -637,7 +616,7 @@ sequenceDiagram
 -   **前端框架**: 纯HTML/CSS/JavaScript，无框架依赖
 -   **图表库**: Chart.js (用于数据可视化)
 -   **认证系统**: JWT + TOTP双重验证
--   **通讯协议**: 支持VMess、VLESS、Trojan协议
+-   **通讯协议**: 支持VMess、VLESS、Trojan、Shadowsocks、ShadowsocksR等多种协议
 
 ---
 
