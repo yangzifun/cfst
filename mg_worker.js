@@ -6,6 +6,7 @@
 //  1. 常量定义
 // =================================================================
 const DEFAULT_JWT_SECRET = 'your-default-jwt-secret-change-this';
+const IP_WORKER_DOMAIN = 'https://ip-cfst.api.yangzifun.org'; // IP管理服务的域名，请确保正确
 
 // =================================================================
 //  2. 工具函数
@@ -262,200 +263,104 @@ class TOTP {
 }
 
 // =================================================================
-//  4. IP获取函数 (已修改)
+//  4. 移除IP获取和更新功能，只保留数据库初始化壳
 // =================================================================
 
-async function fetchIpsFromHostMonit(type = 'v4') {
-    try {
-        const requestBody = { key: "iDetkOys" };
-        if (type === 'v6') {
-            requestBody.type = 'v6';
-        }
-        
-        const res = await fetch('https://api.hostmonit.com/get_optimization_ip', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(requestBody)
-        });
-        
-        if (!res.ok) return [];
-        const data = await res.json();
-        return (data.code === 200 && Array.isArray(data.info)) ? data.info.map(i => ({
-            ip: i.ip,  // 直接使用IP，不添加方括号
-            ip_type: i.ip.includes(':') ? 'v6' : 'v4',
-            carrier: i.line,
-            source: `hostmonit_${type}`  // 记录来源
-        })) : [];
-    } catch (e) { 
-        console.error(`fetchIpsFromHostMonit ${type} error:`, e.message);
-        return []; 
-    }
-}
+// 移除 fetchIpsFromHostMonit, fetchIpsFromVps789, runIpUpdateTask
 
-async function fetchIpsFromVps789() {
-    try {
-        const res = await fetch('https://vps789.com/openApi/cfIpApi', { headers: { 'User-Agent': 'CF-Worker/4.0' } });
-        if (!res.ok) return [];
-        const data = await res.json();
-        const ips = [];
-        if (data.code === 0 && data.data) {
-            for (const k in data.data) {
-                const arr = data.data[k];
-                if (Array.isArray(arr)) {
-                    let c = ['CT', 'CU', 'CM'].includes(k) ? k : 'ALL';
-                    arr.forEach(i => ips.push({
-                        ip: i.ip,  // 直接使用IP，不添加方括号
-                        ip_type: i.ip.includes(':') ? 'v6' : 'v4',
-                        carrier: c,
-                        source: 'vps789'  // 记录来源
-                    }));
-                }
-            }
-        }
-        return ips;
-    } catch (e) { 
-        console.error('fetchIpsFromVps789 error:', e.message);
-        return []; 
-    }
-}
-
-async function runIpUpdateTask(env, sources = null) {
-    console.log('开始IP更新任务...');
-    
-    if (sources === null) {
-        try {
-            const settingsRes = await env.DB.prepare(
-                'SELECT source, enabled FROM auto_update_settings WHERE source IN (?, ?, ?, ?)'
-            ).bind('hostmonit_v4', 'hostmonit_v6', 'vps789', 'global_enabled').all();
-            
-            if (settingsRes && settingsRes.results) {
-                sources = {};
-                settingsRes.results.forEach(setting => {
-                    sources[setting.source] = setting.enabled === 1;
-                });
-            } else {
-                sources = { 
-                    hostmonit_v4: true, 
-                    hostmonit_v6: false,  // 默认不开启V6
-                    vps789: true, 
-                    global_enabled: true 
-                };
-            }
-        } catch (e) {
-            console.error('获取自动更新设置失败，使用默认值:', e.message);
-            sources = { 
-                hostmonit_v4: true, 
-                hostmonit_v6: false,
-                vps789: true, 
-                global_enabled: true 
-            };
-        }
-    }
-
-    const tasks = [];
-    if (sources.hostmonit_v4 !== false) tasks.push(fetchIpsFromHostMonit('v4'));
-    if (sources.hostmonit_v6 !== false) tasks.push(fetchIpsFromHostMonit('v6'));
-    if (sources.vps789 !== false) tasks.push(fetchIpsFromVps789());
-
-    if (tasks.length === 0) {
-        console.log("没有启用的API源");
-        return { success: false, message: "没有启用的API源" };
-    }
-
-    const results = await Promise.allSettled(tasks);
-    const allIps = results
-        .filter(r => r.status === 'fulfilled')
-        .map(r => r.value)
-        .flat();
-
-    const uniqueMap = new Map();
-    allIps.forEach(i => { 
-        if (i && i.ip) {
-            const normalizedIp = i.ip; // IPv6不再需要[]
-            if (uniqueMap.has(normalizedIp)) {
-                const existing = uniqueMap.get(normalizedIp);
-                // 合并来源信息，避免重复
-                if (existing.source && !existing.source.includes(i.source)) {
-                    existing.source = `${existing.source}|${i.source}`;
-                } else if (!existing.source) {
-                    existing.source = i.source;
-                }
-            } else {
-                uniqueMap.set(normalizedIp, { ...i, ip: normalizedIp });
-            }
-        }
-    });
-    const uniqueIps = Array.from(uniqueMap.values());
-
-    if (uniqueIps.length === 0) {
-        return { success: false, message: "未能获取到任何有效IP", count: 0 };
-    }
-
-    try {
-        const globalSetting = sources.global_enabled; // 直接使用从数据库或默认值获取的 global_enabled
-        
-        if (globalSetting === 0) {
-            return { 
-                success: true, 
-                count: uniqueIps.length, 
-                message: `获取到 ${uniqueIps.length} 个IP，但自动更新已关闭`,
-                data: uniqueIps.slice(0, 10)
-            };
-        }
-
-        await env.DB.prepare('DELETE FROM cfips').run();
-        
-        const stmts = uniqueIps.map(i =>
-            env.DB.prepare('INSERT INTO cfips (ip, ip_type, carrier, source, created_at) VALUES (?, ?, ?, ?, ?)')
-                .bind(i.ip, i.ip_type, i.carrier, i.source, Date.now())
-        );
-        
-        const BATCH_SIZE = 50;
-        for (let i = 0; i < stmts.length; i += BATCH_SIZE) {
-            const batch = stmts.slice(i, i + BATCH_SIZE);
-            await env.DB.batch(batch);
-        }
-        
-        await env.DB.prepare(
-            'INSERT OR REPLACE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)'
-        ).bind('last_executed', 1, Date.now()).run();
-        
-        console.log(`IP更新完成: ${uniqueIps.length}条记录`);
-        return { 
-            success: true, 
-            count: uniqueIps.length, 
-            message: `成功更新 ${uniqueIps.length} 个 IP`,
-            timestamp: Date.now()
-        };
-        
-    } catch (e) {
-        console.error('IP更新任务数据库操作失败:', e.message);
-        return { success: false, message: "数据库错误: " + e.message };
-    }
-}
-
-// 初始化默认自动更新设置 (新增函数)
+// 初始化 D1 数据库基本设置 (为 mg_worker.js 简化，不需要管 IP 相关的默认设置，只需确保表存在)
 async function initializeDatabaseSettings(env) {
+    console.log('mg_worker.js: checking database tables...');
     try {
-        const defaultSettings = [
-            { source: 'global_enabled', enabled: 1, updated_at: Date.now() },
-            { source: 'hostmonit_v4', enabled: 1, updated_at: Date.now() },
-            { source: 'hostmonit_v6', enabled: 0, updated_at: Date.now() }, // 默认不开启IPv6
-            { source: 'vps789', enabled: 1, updated_at: Date.now() },
-            { source: 'last_executed', enabled: 0, updated_at: 0 }
-        ];
+        // 创建 admin_users 表
+        await env.DB.prepare(`
+            CREATE TABLE IF NOT EXISTS admin_users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                mfa_enabled INTEGER DEFAULT 0,
+                mfa_secret TEXT,
+                last_mfa_login INTEGER DEFAULT 0,
+                last_backup_login INTEGER DEFAULT 0,
+                created_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000)
+            );
+        `).run();
+
+        // 创建 mfa_backup_codes 表
+        await env.DB.prepare(`
+            CREATE TABLE IF NOT EXISTS mfa_backup_codes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                code TEXT UNIQUE NOT NULL,
+                created_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000),
+                used INTEGER DEFAULT 0,
+                used_at INTEGER DEFAULT 0
+            );
+        `).run();
         
-        // 使用 INSERT OR IGNORE 确保只在不存在时插入
-        const stmts = defaultSettings.map(setting =>
-            env.DB.prepare(
-                'INSERT OR IGNORE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)'
-            ).bind(setting.source, setting.enabled, setting.updated_at)
-        );
-        await env.DB.batch(stmts);
-        
-        console.log('数据库设置初始化完成或已存在');
+        // 创建 cf_domains 表
+        await env.DB.prepare(`
+            CREATE TABLE IF NOT EXISTS cf_domains (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                domain TEXT UNIQUE NOT NULL,
+                remark TEXT,
+                created_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000)
+            );
+        `).run();
+
+        // 创建 configs 表
+        await env.DB.prepare(`
+            CREATE TABLE IF NOT EXISTS configs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                uuid TEXT NOT NULL,
+                ip TEXT,
+                domain TEXT,
+                port INTEGER,
+                meta TEXT,
+                created_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000),
+                updated_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000)
+            );
+        `).run();
+        await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_configs_uuid ON configs (uuid);').run();
+
+        // 创建 cfips 表 (需要确保存在，供 mg_worker.js 读取)
+        await env.DB.prepare(`
+            CREATE TABLE IF NOT EXISTS cfips (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ip TEXT UNIQUE NOT NULL,
+                ip_type TEXT,
+                carrier TEXT,
+                source TEXT,
+                created_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000)
+            );
+        `).run();
+
+        // 创建 auto_update_settings 表 (需要确保存在，供 mg_worker.js 读取和写入设置，ip-worker.js 读取)
+        await env.DB.prepare(`
+            CREATE TABLE IF NOT EXISTS auto_update_settings (
+                source TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL,
+                updated_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000)
+            );
+        `).run();
+
+        // 创建 config_access_logs (订阅访问日志) 表
+        await env.DB.prepare(`
+            CREATE TABLE IF NOT EXISTS config_access_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                uuid TEXT NOT NULL,
+                query_type TEXT NOT NULL, -- 'subscription' or 'api-generation'
+                client_ip TEXT,
+                user_agent TEXT,
+                created_at TEXT DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            );
+        `).run();
+        await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_access_logs_uuid ON config_access_logs (uuid);').run();
+        await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_access_logs_date ON config_access_logs (created_at);').run();
+
+        console.log('mg_worker.js: D1 database tables checked/initialized.');
     } catch (e) {
-        console.error('数据库设置初始化失败:', e.message);
+        console.error('mg_worker.js: Failed to check/initialize database tables:', e.message);
     }
 }
 
@@ -785,7 +690,7 @@ async function handleMfaRegenerateBackupCodes(req, env, currentUser) {
     }
 }
 
-// 修改handleGetAutoUpdateSettings函数 (已修改)
+// 获取自动更新设置 (从 ip-worker.js 获取，但在 mg_worker.js 中读取共享数据库)
 async function handleGetAutoUpdateSettings(req, env) {
     try {
         const settings = await env.DB.prepare(
@@ -795,7 +700,7 @@ async function handleGetAutoUpdateSettings(req, env) {
         const result = { 
             global_enabled: 0, 
             hostmonit_v4: 1, 
-            hostmonit_v6: 0,  // 默认不开启
+            hostmonit_v6: 0, // 默认不开启IPv6
             vps789: 1, 
             last_executed: 0 
         };
@@ -816,7 +721,7 @@ async function handleGetAutoUpdateSettings(req, env) {
     }
 }
 
-// 修改handleSetAutoUpdateSettings函数 (已修改)
+// 设置自动更新配置 (在 mg_worker.js 中直接写入共享数据库)
 async function handleSetAutoUpdateSettings(req, env) {
     try {
         const { global_enabled, hostmonit_v4, hostmonit_v6, vps789 } = await req.json();
@@ -843,7 +748,58 @@ async function handleSetAutoUpdateSettings(req, env) {
     }
 }
 
-// 修改handleGetStats函数，添加订阅统计
+// 新增代理函数：调用 IP Worker 执行 IP 更新
+async function handleIpWorkerUpdate(req, env) {
+    try {
+        // mg_worker.js 在这里会验证 JWT token，然后从请求体中获取设置
+        // 这些设置是前端点击“立即更新”时传递过来的当前开关状态
+        const { global_enabled, hostmonit_v4, hostmonit_v6, vps789 } = await req.json();
+
+        // 将这些设置保存到共享数据库，以便 ip-worker.js 可以读取
+        // 注意：这里只更新了相关IP源的enabled状态。
+        // global_enabled 状态在 handleSetAutoUpdateSettings 中设置，也会被 ip-worker.js 读取
+        const stmts = [
+             env.DB.prepare('INSERT OR REPLACE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)')
+                .bind('global_enabled', global_enabled ? 1 : 0, Date.now()), // 确保 global_enabled 也被传递和保存
+            env.DB.prepare('INSERT OR REPLACE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)')
+                .bind('hostmonit_v4', hostmonit_v4 ? 1 : 0, Date.now()),
+            env.DB.prepare('INSERT OR REPLACE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)')
+                .bind('hostmonit_v6', hostmonit_v6 ? 1 : 0, Date.now()),
+            env.DB.prepare('INSERT OR REPLACE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)')
+                .bind('vps789', vps789 ? 1 : 0, Date.now())
+        ];
+        await env.DB.batch(stmts);
+        
+        // 调用 ip-worker.js 的手动更新接口 (GET 请求，无需认证)
+        const ipWorkerResponse = await fetch(`${IP_WORKER_DOMAIN}/api/ips/update`, {
+            method: 'GET'
+        });
+
+        if (!ipWorkerResponse.ok) {
+            const errorText = await ipWorkerResponse.text();
+            throw new Error(`IP Worker响应错误: ${ipWorkerResponse.status} - ${errorText}`);
+        }
+
+        const result = await ipWorkerResponse.json();
+        
+        // ip-worker.js 已经更新了 last_executed，这里无需再次更新，直接返回结果即可。
+        // 如果 ip-worker.js 没有更新，此处可以添加一个回退更新逻辑
+        // await env.DB.prepare(
+        //     'INSERT OR REPLACE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)'
+        // ).bind('last_executed', 1, Date.now()).run();
+
+        return jsonResponse(result);
+    } catch (error) {
+        console.error('handleIpWorkerUpdate error:', error.message);
+        return jsonResponse({ 
+            success: false, 
+            message: 'IP更新失败: ' + error.message 
+        }, 500);
+    }
+}
+
+
+// 获取统计数据，其中包含 IP 数量和自动更新状态
 async function handleGetStats(req, env) {
     try {
         const url = new URL(req.url);
@@ -851,7 +807,7 @@ async function handleGetStats(req, env) {
         
         // 获取基础统计
         const domains = await env.DB.prepare('SELECT COUNT(*) as c FROM cf_domains').first('c');
-        const ips = await env.DB.prepare('SELECT COUNT(*) as c FROM cfips').first('c');
+        const ips = await env.DB.prepare('SELECT COUNT(*) as c FROM cfips').first('c'); // 从共享数据库读取
         const uuids = await env.DB.prepare('SELECT COUNT(DISTINCT uuid) as c FROM configs').first('c');
         
         const enabledSetting = await env.DB.prepare(
@@ -982,7 +938,7 @@ async function handleDomains(req, env, method) {
     }
 }
 
-// 修改handleIps函数 (已修改)
+// 修改handleIps函数 (只保留读取 cfips 表和删除单条 IP 的功能)
 async function handleIps(req, env, method) {
     try {
         const url = new URL(req.url);
@@ -993,7 +949,7 @@ async function handleIps(req, env, method) {
             const sortField = url.searchParams.get('sort') || 'created_at';
             const sortOrder = (url.searchParams.get('order') || 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
             
-            const allowedSorts = ['ip', 'ip_type', 'carrier', 'source', 'created_at']; // 增加source
+            const allowedSorts = ['ip', 'ip_type', 'carrier', 'source', 'created_at'];
             const actualSort = allowedSorts.includes(sortField) ? sortField : 'created_at';
             const offset = (page - 1) * size;
 
@@ -1027,23 +983,8 @@ async function handleIps(req, env, method) {
     }
 }
 
-// 修改handleIpsRefresh函数 (已修改)
-async function handleIpsRefresh(req, env) {
-    try {
-        const body = await req.json().catch(() => ({}));
-        // 使用新的来源名称
-        const sources = {
-            hostmonit_v4: body.hostmonit_v4,
-            hostmonit_v6: body.hostmonit_v6,
-            vps789: body.vps789
-        };
-        const res = await runIpUpdateTask(env, sources);
-        return jsonResponse(res);
-    } catch (error) {
-        console.error('handleIpsRefresh error:', error.message);
-        return jsonResponse({ error: '服务器错误' }, 500);
-    }
-}
+// 移除 handleIpsRefresh (原始代码中的提示性函数)，由新的 handleIpWorkerUpdate 代理 IP 更新
+// async function handleIpsRefresh(req, env) { ... }
 
 async function handleUuids(req, env, method) {
     try {
@@ -1173,8 +1114,9 @@ async function handleApi(req, env) {
             return await handleIps(req, env, method);
         }
         
+        // 新的 IP 刷新接口，由 mg_worker.js 代理到 ip-worker.js
         if (path === '/api/ips/refresh' && method === 'POST') {
-            return await handleIpsRefresh(req, env);
+            return await handleIpWorkerUpdate(req, env);
         }
         
         if (path === '/api/uuids' && ['GET', 'DELETE'].includes(method)) {
@@ -1190,7 +1132,7 @@ async function handleApi(req, env) {
 }
 
 // =================================================================
-//  7. HTML模板 (已修改)
+//  7. HTML模板 (完整，修改了 `refreshIps` 函数的 JavaScript 部分)
 // =================================================================
 
 const globalCss = `
@@ -2090,15 +2032,11 @@ const adminHtml = `
                     return null;
                 }
                 
-                if (res.status === 500) {
-                    toast('服务器内部错误', 'error');
-                    return null;
-                }
-                
+                // For 200/OK, check if the response data itself signifies an error
                 const data = await res.json();
                 if (data.error) {
                     toast(data.error, 'error');
-                    return null;
+                    return null; // Return null to indicate a logical error
                 }
                 
                 return data;
@@ -2133,8 +2071,6 @@ const adminHtml = `
             }
             
             try {
-                // 在前端初始化时也加载默认设置 (确保数据库有这些记录)
-                // 实际在 Worker 启动时调用 initializeDatabaseSettings 更好
                 await init(); 
             } catch (error) {
                 document.getElementById('loader').innerHTML = \`
@@ -3002,10 +2938,11 @@ const adminHtml = `
             }
         }
         
+        // 修改 refreshIps 函数以调用 mg_worker.js 后端代理
         async function refreshIps() {
             const globalEnabled = document.getElementById('sw-global').checked;
             const hmV4 = document.getElementById('sw-hm-v4').checked; 
-            const hmV6 = document.getElementById('sw-hm-v6').checked; // 获取 IPv6 开关状态
+            const hmV6 = document.getElementById('sw-hm-v6').checked;
             const v7 = document.getElementById('sw-v7').checked;
 
             if (!globalEnabled) {
@@ -3018,18 +2955,28 @@ const adminHtml = `
             }
 
             toast('IP更新任务已开始...', 'info');
-            const res = await api('ips/refresh', 'POST', { 
-                hostmonit_v4: hmV4, 
-                hostmonit_v6: hmV6, // 提交 IPv6 开关状态
-                vps789: v7 
-            });
-            if(res && res.success) { 
-                toast(\`更新完成: \${res.message}\`); 
-                ipState.page = 1; 
-                loadIp(); 
-                loadStats(); 
-            } else if (res) { 
-                toast(\`更新失败: \${res.message}\`, 'error'); 
+            
+            try {
+                // 调用 mg_worker.js 的 /api/ips/refresh 接口
+                // mg_worker.js 后端会负责保存这些设置，并代理请求到 ip-worker.js
+                const res = await api('ips/refresh', 'POST', {
+                    global_enabled: globalEnabled, // 确保 global_enabled 也被传递
+                    hostmonit_v4: hmV4, 
+                    hostmonit_v6: hmV6,
+                    vps789: v7 
+                });
+                
+                // 'api' 辅助函数已经处理了 401/403/500 错误和 toast 消息。
+                if (res && res.success) { // 如果 res 不是 null 且 success 为 true
+                    toast('更新完成: ' + res.message); 
+                    ipState.page = 1; 
+                    loadIp(); 
+                    loadStats(); // 重新加载状态，更新最后执行时间
+                } else if (res) { // 如果 res 不是 null 但 success 为 false
+                    toast('更新失败: ' + (res.message || '未知错误'), 'error'); 
+                }
+            } catch (error) { // 捕获 api 调用本身的网络错误
+                toast('网络错误: ' + error.message, 'error');
             }
         }
         
@@ -3135,14 +3082,14 @@ const adminHtml = `
 `;
 
 // =================================================================
-//  8. 主入口
+//  8. 主入口 (移除定时任务)
 // =================================================================
 
 export default {
     async fetch(request, env, ctx) {
         const url = new URL(request.url);
         
-        // Ensure database settings are initialized on first access or cold start
+        // 确保数据库设置已初始化
         ctx.waitUntil(initializeDatabaseSettings(env));
 
         // 处理API请求
@@ -3161,8 +3108,6 @@ export default {
         }
         
         // 默认返回管理页面
-        // 注意：这里的Admin页面返回逻辑应该由前端JS处理token验证和重定向，
-        // Worker只负责提供HTML。
         return new Response(adminHtml, { 
             headers: { 
                 'Content-Type': 'text/html;charset=UTF-8',
@@ -3171,17 +3116,6 @@ export default {
         });
     },
     
-    async scheduled(event, env, ctx) {
-        ctx.waitUntil((async () => {
-            console.log('定时IP更新任务开始执行');
-            await initializeDatabaseSettings(env); // 确保定时任务前设置已初始化
-            try {
-                await runIpUpdateTask(env);
-                console.log('定时IP更新任务完成');
-            } catch (error) {
-                console.error('定时IP更新任务失败:', error);
-            }
-        })());
-    }
+    // 移除定时任务，IP更新相关的定时调度由 ip-worker.js 处理
+    // async scheduled(event, env, ctx) { ... }
 };
-
