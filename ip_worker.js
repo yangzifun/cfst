@@ -24,7 +24,7 @@ function jsonResponse(data, status = 200) {
     });
 }
 
-// JWT验证（用于管理后台认证）
+// JWT验证（当前代码中未使用，但保留以备未来扩展）
 async function verifyJwt(token, secret = DEFAULT_JWT_SECRET) {
     try {
         const [h, p, s] = token.split('.');
@@ -410,47 +410,6 @@ async function handleManualIpUpdate(req, env) {
 }
 
 /**
- * 设置自动更新配置
- */
-async function handleSetAutoUpdateSettings(req, env) {
-    try {
-        const authHeader = req.headers.get('Authorization');
-        if (!authHeader || !authHeader.startsWith('Bearer ')) {
-            return jsonResponse({ error: '未授权，请重新登录' }, 401);
-        }
-        
-        const token = authHeader.split(' ')[1];
-        const payload = await verifyJwt(token, env.JWT_SECRET || DEFAULT_JWT_SECRET);
-        
-        if (!payload) {
-            return jsonResponse({ error: 'Token 无效或已过期' }, 401);
-        }
-        
-        const { global_enabled, hostmonit_v4, hostmonit_v6, vps789 } = await req.json();
-        
-        const stmts = [
-            env.DB.prepare('INSERT OR REPLACE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)')
-                .bind('global_enabled', global_enabled ? 1 : 0, Date.now()),
-            env.DB.prepare('INSERT OR REPLACE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)')
-                .bind('hostmonit_v4', hostmonit_v4 ? 1 : 0, Date.now()),
-            env.DB.prepare('INSERT OR REPLACE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)')
-                .bind('hostmonit_v6', hostmonit_v6 ? 1 : 0, Date.now()),
-            env.DB.prepare('INSERT OR REPLACE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)')
-                .bind('vps789', vps789 ? 1 : 0, Date.now())
-        ];
-        
-        await env.DB.batch(stmts);
-        return jsonResponse({ 
-            success: true,
-            message: '自动更新设置已保存'
-        });
-    } catch (error) {
-        console.error('handleSetAutoUpdateSettings error:', error.message);
-        return jsonResponse({ error: '服务器错误' }, 500);
-    }
-}
-
-/**
  * 获取IP列表（只读接口，无需认证）
  */
 async function handleGetIpList(req, env) {
@@ -513,11 +472,6 @@ async function handleApi(req, env) {
             return await handleManualIpUpdate(req, env);
         }
         
-        // 需要JWT认证的API
-        if (path === '/api/ips/settings' && method === 'POST') {
-            return await handleSetAutoUpdateSettings(req, env);
-        }
-        
         return jsonResponse({ error: 'API端点不存在' }, 404);
         
     } catch (error) {
@@ -551,11 +505,9 @@ export default {
                 public: [
                     'GET /api/ips/list - 获取IP列表（带统计信息）',
                     'GET /api/ips/update - 手动触发IP更新（带详细日志）'
-                ],
-                authenticated: [
-                    'POST /api/ips/settings - 设置自动更新配置'
                 ]
-            }
+            },
+            note: '此服务专用于IP更新任务，自动更新设置由mg_worker.js管理'
         }, null, 2), { 
             headers: { 
                 'Content-Type': 'application/json',
