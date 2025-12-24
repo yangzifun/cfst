@@ -1079,11 +1079,11 @@ const loginHtml = `
             </div>
         </div>
         
-        <a class="backup-link" onclick="verifyTOTP()" id="verifyTOTPBtn" style="flex: 2;">验证</button>
+        <a class="backup-link" onclick="showBackupLogin()" >使用备份码登录</a>
             </div>
         </div>
         
-        <a class="backup-link" onclick="showBackupLogin()">使用备份码登录</a>
+        
     </div>
 
     <div class="login-box" id="backupStep" style="display: none;">
@@ -2215,7 +2215,7 @@ const adminHtml = `
             if (typeof cb === 'function') cb(pwd);
         }
 
-        function openMfaSettingsModal() { return; /* removed */
+        function openMfaSettingsModal() {
             document.getElementById('mfaModal').style.display = 'flex';
             document.getElementById('mfaModalContent').innerHTML = \`
                 <p>请选择您要进行的操作：</p>
