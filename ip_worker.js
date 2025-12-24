@@ -40,7 +40,7 @@ async function verifyJwt(token, secret = DEFAULT_JWT_SECRET) {
 }
 
 // =================================================================
-//  3. IP获取函数（从mg_worker.js复制）
+//  3. IP获取函数（修复IPv6数据解析问题）
 // =================================================================
 
 async function fetchIpsFromHostMonit(type = 'v4') {
@@ -56,14 +56,33 @@ async function fetchIpsFromHostMonit(type = 'v4') {
             body: JSON.stringify(requestBody)
         });
         
-        if (!res.ok) return [];
+        if (!res.ok) {
+            console.error(`HostMonit ${type} API响应错误: ${res.status}`);
+            return [];
+        }
+        
         const data = await res.json();
-        return (data.code === 200 && Array.isArray(data.info)) ? data.info.map(i => ({
-            ip: i.ip,  // 直接使用IP，不添加方括号
-            ip_type: i.ip.includes(':') ? 'v6' : 'v4',
-            carrier: i.line,
-            source: `hostmonit_${type}`  // 记录来源
-        })) : [];
+        console.log(`HostMonit ${type} 返回数据:`, JSON.stringify(data).substring(0, 500));
+        
+        if (data.code === 200 && Array.isArray(data.info)) {
+            return data.info.map(i => {
+                // 标准化运营商标识
+                let carrier = i.line || 'ALL';
+                if (carrier === 'CMI') carrier = 'CM'; // 标准化为'CM'
+                if (carrier === 'CT') carrier = 'CT';
+                if (carrier === 'CU') carrier = 'CU';
+                
+                return {
+                    ip: i.ip,  // 直接使用IP，不添加方括号
+                    ip_type: i.ip.includes(':') ? 'v6' : 'v4',
+                    carrier: carrier,
+                    source: `hostmonit_${type}`
+                };
+            });
+        } else {
+            console.error(`HostMonit ${type} 数据格式错误:`, data);
+            return [];
+        }
     } catch (e) { 
         console.error(`fetchIpsFromHostMonit ${type} error:`, e.message);
         return []; 
@@ -72,24 +91,61 @@ async function fetchIpsFromHostMonit(type = 'v4') {
 
 async function fetchIpsFromVps789() {
     try {
-        const res = await fetch('https://vps789.com/openApi/cfIpApi', { headers: { 'User-Agent': 'CF-Worker/4.0' } });
-        if (!res.ok) return [];
+        const res = await fetch('https://vps789.com/openApi/cfIpApi', { 
+            headers: { 
+                'User-Agent': 'CF-Worker/4.0',
+                'Accept': 'application/json'
+            } 
+        });
+        
+        if (!res.ok) {
+            console.error('Vps789 API响应错误:', res.status);
+            return [];
+        }
+        
         const data = await res.json();
+        console.log('Vps789 返回数据结构:', Object.keys(data));
+        
         const ips = [];
         if (data.code === 0 && data.data) {
+            // 调试输出数据结构
+            console.log('Vps789 data.keys:', Object.keys(data.data));
+            
+            // 处理所有可能的键
             for (const k in data.data) {
                 const arr = data.data[k];
+                console.log(`处理Vps789键: ${k}, 数据类型:`, Array.isArray(arr) ? '数组' : typeof arr);
+                
                 if (Array.isArray(arr)) {
-                    let c = ['CT', 'CU', 'CM'].includes(k) ? k : 'ALL';
-                    arr.forEach(i => ips.push({
-                        ip: i.ip,  // 直接使用IP，不添加方括号
-                        ip_type: i.ip.includes(':') ? 'v6' : 'v4',
-                        carrier: c,
-                        source: 'vps789'  // 记录来源
-                    }));
+                    // 标准化运营商标识
+                    let carrier = 'ALL';
+                    if (k.includes('移动') || k.includes('CM')) carrier = 'CM';
+                    else if (k.includes('电信') || k.includes('CT')) carrier = 'CT';
+                    else if (k.includes('联通') || k.includes('CU')) carrier = 'CU';
+                    else if (k === 'ALL') carrier = 'ALL';
+                    else if (k === 'CM') carrier = 'CM';
+                    else if (k === 'CT') carrier = 'CT';
+                    else if (k === 'CU') carrier = 'CU';
+                    
+                    console.log(`Vps789 键 ${k} 标准化为运营商: ${carrier}, IP数量: ${arr.length}`);
+                    
+                    arr.forEach(i => {
+                        if (i && i.ip) {
+                            ips.push({
+                                ip: i.ip,
+                                ip_type: i.ip.includes(':') ? 'v6' : 'v4',
+                                carrier: carrier,
+                                source: 'vps789'
+                            });
+                        }
+                    });
                 }
             }
+        } else {
+            console.error('Vps789数据格式错误:', data);
         }
+        
+        console.log(`Vps789 总共获取到 ${ips.length} 个IP`);
         return ips;
     } catch (e) { 
         console.error('fetchIpsFromVps789 error:', e.message);
@@ -98,7 +154,7 @@ async function fetchIpsFromVps789() {
 }
 
 // =================================================================
-//  4. 核心IP更新任务函数
+//  4. 核心IP更新任务函数（增强调试信息）
 // =================================================================
 
 /**
@@ -121,6 +177,7 @@ async function runIpUpdateTask(env, sources = null) {
                 settingsRes.results.forEach(setting => {
                     sources[setting.source] = setting.enabled === 1;
                 });
+                console.log('从数据库读取的更新设置:', sources);
             } else {
                 sources = { 
                     hostmonit_v4: true, 
@@ -128,6 +185,7 @@ async function runIpUpdateTask(env, sources = null) {
                     vps789: true, 
                     global_enabled: true 
                 };
+                console.log('使用默认更新设置:', sources);
             }
         } catch (e) {
             console.error('获取自动更新设置失败，使用默认值:', e.message);
@@ -141,42 +199,116 @@ async function runIpUpdateTask(env, sources = null) {
     }
 
     const tasks = [];
-    if (sources.hostmonit_v4 !== false) tasks.push(fetchIpsFromHostMonit('v4'));
-    if (sources.hostmonit_v6 !== false) tasks.push(fetchIpsFromHostMonit('v6'));
-    if (sources.vps789 !== false) tasks.push(fetchIpsFromVps789());
+    const taskSources = [];
+    
+    if (sources.hostmonit_v4 !== false) {
+        tasks.push(fetchIpsFromHostMonit('v4'));
+        taskSources.push('hostmonit_v4');
+    }
+    if (sources.hostmonit_v6 !== false) {
+        tasks.push(fetchIpsFromHostMonit('v6'));
+        taskSources.push('hostmonit_v6');
+    }
+    if (sources.vps789 !== false) {
+        tasks.push(fetchIpsFromVps789());
+        taskSources.push('vps789');
+    }
 
     if (tasks.length === 0) {
         console.log("没有启用的API源");
         return { success: false, message: "没有启用的API源" };
     }
 
+    console.log(`启用的任务: ${taskSources.join(', ')}`);
     const results = await Promise.allSettled(tasks);
-    const allIps = results
-        .filter(r => r.status === 'fulfilled')
-        .map(r => r.value)
-        .flat();
+    
+    const allIps = [];
+    const sourceStats = {};
+    
+    results.forEach((result, index) => {
+        const sourceName = taskSources[index];
+        if (result.status === 'fulfilled') {
+            const ips = result.value;
+            console.log(`${sourceName} 获取到 ${ips.length} 个IP`);
+            
+            // 按运营商统计
+            const carrierStats = {};
+            const ipTypeStats = { v4: 0, v6: 0 };
+            
+            ips.forEach(i => {
+                if (i && i.ip) {
+                    // 标准化运营商
+                    const carrier = i.carrier || 'ALL';
+                    carrierStats[carrier] = (carrierStats[carrier] || 0) + 1;
+                    
+                    // 统计IP类型
+                    const ipType = i.ip.includes(':') ? 'v6' : 'v4';
+                    ipTypeStats[ipType] = (ipTypeStats[ipType] || 0) + 1;
+                    
+                    allIps.push(i);
+                }
+            });
+            
+            sourceStats[sourceName] = {
+                count: ips.length,
+                carrierStats,
+                ipTypeStats
+            };
+            
+            console.log(`${sourceName} 运营商分布:`, carrierStats);
+            console.log(`${sourceName} IP类型分布:`, ipTypeStats);
+        } else {
+            console.error(`${sourceName} 任务失败:`, result.reason);
+            sourceStats[sourceName] = {
+                error: result.reason?.message || '未知错误',
+                count: 0
+            };
+        }
+    });
 
+    console.log(`总共获取到 ${allIps.length} 个IP`);
+    
     const uniqueMap = new Map();
     allIps.forEach(i => { 
         if (i && i.ip) {
-            const normalizedIp = i.ip; // IPv6不再需要[]
-            if (uniqueMap.has(normalizedIp)) {
+            const normalizedIp = i.ip.trim();
+            if (!uniqueMap.has(normalizedIp)) {
+                uniqueMap.set(normalizedIp, { ...i, ip: normalizedIp });
+            } else {
+                // 合并来源信息
                 const existing = uniqueMap.get(normalizedIp);
-                // 合并来源信息，避免重复
                 if (existing.source && !existing.source.includes(i.source)) {
                     existing.source = `${existing.source}|${i.source}`;
-                } else if (!existing.source) {
-                    existing.source = i.source;
                 }
-            } else {
-                uniqueMap.set(normalizedIp, { ...i, ip: normalizedIp });
             }
         }
     });
+    
     const uniqueIps = Array.from(uniqueMap.values());
+    console.log(`去重后剩余 ${uniqueIps.length} 个唯一IP`);
+
+    // 最终统计
+    const finalCarrierStats = {};
+    const finalIpTypeStats = { v4: 0, v6: 0 };
+    
+    uniqueIps.forEach(i => {
+        const carrier = i.carrier || 'ALL';
+        finalCarrierStats[carrier] = (finalCarrierStats[carrier] || 0) + 1;
+        
+        const ipType = i.ip.includes(':') ? 'v6' : 'v4';
+        finalIpTypeStats[ipType] = (finalIpTypeStats[ipType] || 0) + 1;
+    });
+    
+    console.log('最终运营商分布:', finalCarrierStats);
+    console.log('最终IP类型分布:', finalIpTypeStats);
 
     if (uniqueIps.length === 0) {
-        return { success: false, message: "未能获取到任何有效IP", count: 0 };
+        return { 
+            success: false, 
+            message: "未能获取到任何有效IP", 
+            count: 0,
+            sourceStats
+        };
     }
 
     try {
@@ -187,21 +319,26 @@ async function runIpUpdateTask(env, sources = null) {
                 success: true, 
                 count: uniqueIps.length, 
                 message: `获取到 ${uniqueIps.length} 个IP，但自动更新已关闭`,
-                data: uniqueIps.slice(0, 10)
+                data: uniqueIps.slice(0, 10),
+                carrierStats: finalCarrierStats,
+                sourceStats
             };
         }
 
         await env.DB.prepare('DELETE FROM cfips').run();
+        console.log('已清空cfips表');
         
         const stmts = uniqueIps.map(i =>
             env.DB.prepare('INSERT INTO cfips (ip, ip_type, carrier, source, created_at) VALUES (?, ?, ?, ?, ?)')
-                .bind(i.ip, i.ip_type, i.carrier, i.source, Date.now())
+                .bind(i.ip, i.ip_type || (i.ip.includes(':') ? 'v6' : 'v4'), 
+                      i.carrier || 'ALL', i.source || 'unknown', Date.now())
         );
         
         const BATCH_SIZE = 50;
         for (let i = 0; i < stmts.length; i += BATCH_SIZE) {
             const batch = stmts.slice(i, i + BATCH_SIZE);
             await env.DB.batch(batch);
+            console.log(`批量插入 ${i} 到 ${i+BATCH_SIZE-1} 的IP`);
         }
         
         await env.DB.prepare(
@@ -213,12 +350,19 @@ async function runIpUpdateTask(env, sources = null) {
             success: true, 
             count: uniqueIps.length, 
             message: `成功更新 ${uniqueIps.length} 个 IP`,
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            carrierStats: finalCarrierStats,
+            ipTypeStats: finalIpTypeStats,
+            sourceStats
         };
         
     } catch (e) {
         console.error('IP更新任务数据库操作失败:', e.message);
-        return { success: false, message: "数据库错误: " + e.message };
+        return { 
+            success: false, 
+            message: "数据库错误: " + e.message,
+            sourceStats
+        };
     }
 }
 
@@ -256,6 +400,7 @@ async function initializeDatabaseSettings(env) {
  */
 async function handleManualIpUpdate(req, env) {
     try {
+        console.log('手动触发IP更新');
         const res = await runIpUpdateTask(env, null);
         return jsonResponse(res);
     } catch (error) {
@@ -323,12 +468,24 @@ async function handleGetIpList(req, env) {
         const total = await env.DB.prepare('SELECT COUNT(*) as c FROM cfips').first('c');
         const query = `SELECT * FROM cfips ORDER BY ${actualSort} ${sortOrder} LIMIT ? OFFSET ?`;
         const { results } = await env.DB.prepare(query).bind(size, offset).all();
+        
+        // 统计信息
+        const stats = await env.DB.prepare(`
+            SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN ip_type = 'v6' THEN 1 ELSE 0 END) as v6_count,
+                carrier,
+                COUNT(*) as carrier_count
+            FROM cfips 
+            GROUP BY carrier
+        `).all();
 
         return jsonResponse({ 
             total: total || 0, 
             data: results || [], 
             page, 
-            size 
+            size,
+            stats: stats.results || []
         });
     } catch (error) {
         console.error('handleGetIpList error:', error.message);
@@ -389,11 +546,11 @@ export default {
         return new Response(JSON.stringify({
             service: 'IP Management Worker',
             status: 'running',
-            version: '1.0.0',
+            version: '2.0.0',
             endpoints: {
                 public: [
-                    'GET /api/ips/list - 获取IP列表',
-                    'GET /api/ips/update - 手动触发IP更新'
+                    'GET /api/ips/list - 获取IP列表（带统计信息）',
+                    'GET /api/ips/update - 手动触发IP更新（带详细日志）'
                 ],
                 authenticated: [
                     'POST /api/ips/settings - 设置自动更新配置'
