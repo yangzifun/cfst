@@ -45,6 +45,99 @@ function getProtocol(configStr) {
     return 'unknown';
 }
 
+// =================================================================
+//  SECTION 0: Access Logging
+// =================================================================
+
+/**
+ * 记录配置访问日志
+ * @param {Object} env - Worker环境变量
+ * @param {string} uuid - 用户UUID
+ * @param {string} queryType - 查询类型: 'subscription'(订阅) 或 'api-generation'(网页生成)
+ * @param {string} clientIp - 客户端IP地址
+ * @param {string} userAgent - 客户端User-Agent
+ */
+async function logConfigAccess(env, uuid, queryType, clientIp, userAgent) {
+    try {
+        const db = env.DB;
+        if (!db) {
+            console.error("D1数据库未绑定，无法记录访问日志");
+            return;
+        }
+        
+        const stmt = db.prepare(
+            'INSERT INTO config_access_logs (uuid, query_type, client_ip, user_agent) VALUES (?, ?, ?, ?)'
+        );
+        
+        await stmt.bind(uuid, queryType, clientIp || 'unknown', userAgent || 'unknown').run();
+        console.log(`成功记录访问日志: uuid=${uuid}, type=${queryType}`);
+    } catch (e) {
+        console.error("记录访问日志失败:", e.message);
+        // 不中断主流程，仅记录错误
+    }
+}
+
+/**
+ * 获取客户端IP地址 (支持Cloudflare Worker)
+ * @param {Request} request - HTTP请求对象
+ * @returns {string} 客户端IP地址
+ */
+function getClientIp(request) {
+    // Cloudflare Workers可以通过cf-connecting-ip头获取真实IP
+    const cfIp = request.headers.get('cf-connecting-ip');
+    if (cfIp) return cfIp;
+    
+    // 回退到X-Forwarded-For
+    const forwardedFor = request.headers.get('x-forwarded-for');
+    if (forwardedFor) {
+        // 取第一个IP（原始客户端IP）
+        return forwardedFor.split(',')[0].trim();
+    }
+    
+    // 最终回退方案
+    return 'unknown';
+}
+
+/**
+ * 获取访问统计
+ * @param {Object} env - Worker环境变量
+ * @param {string} uuid - UUID（可选，不提供则查询所有）
+ * @param {Object} options - 查询选项
+ * @returns {Promise<Object>} 统计结果
+ */
+async function getAccessStats(env, uuid = null, options = {}) {
+    try {
+        const db = env.DB;
+        if (!db) throw new Error("D1数据库未绑定。");
+        
+        let query = 'SELECT uuid, query_type, COUNT(*) as count, DATE(created_at) as date FROM config_access_logs WHERE 1=1';
+        const params = [];
+        
+        if (uuid) {
+            query += ' AND uuid = ?';
+            params.push(uuid);
+        }
+        
+        // 时间范围过滤
+        if (options.startDate) {
+            query += ' AND created_at >= ?';
+            params.push(options.startDate);
+        }
+        
+        if (options.endDate) {
+            query += ' AND created_at <= ?';
+            params.push(options.endDate);
+        }
+        
+        query += ' GROUP BY uuid, query_type, DATE(created_at) ORDER BY date DESC, count DESC';
+        
+        const { results } = await db.prepare(query).bind(...params).all();
+        return { success: true, data: results };
+    } catch (e) {
+        console.error("获取访问统计失败:", e.message);
+        return { success: false, error: e.message };
+    }
+}
 
 // =================================================================
 //  SECTION 1: Data Fetching (STRICTLY READ ONLY)
@@ -116,7 +209,6 @@ async function handleGetBatchAddresses(url, env) {
     }
 }
 
-
 // =================================================================
 //  SECTION 2: Config Generation Logic
 // =================================================================
@@ -186,7 +278,7 @@ function replaceAddressesInConfigs(baseConfigsToProcess, addressList) {
                     url.hostname = newAddr; 
                     generatedConfigs.push(url.toString());
                 } catch (e) {
-                      pushError(`处理 ${configType} 出错: ${e.message}`);
+                    pushError(`处理 ${configType} 出错: ${e.message}`);
                 }
             } else if (configType === 'vmess') {
                 const tempVmessObj = JSON.parse(JSON.stringify(processedBaseConfig));
@@ -237,8 +329,15 @@ async function generateConfigs(request, env) {
 
         const successCount = generatedConfigs.filter(c => !c.startsWith('[错误]')).length;
         const errorCount = generatedConfigs.length - successCount;
-        let message = `生成完成！成功 ${successCount} 条`
-        if(errorCount > 0) message += `, 失败 ${errorCount} 条。`;
+        let message = `生成完成！成功 ${successCount} 条`;
+        if (errorCount > 0) message += `, 失败 ${errorCount} 条。`;
+        
+        // 如果使用UUID生成，记录访问日志
+        if (baseConfigUuid) {
+            const clientIp = getClientIp(request);
+            const userAgent = request.headers.get('user-agent') || 'unknown';
+            await logConfigAccess(env, baseConfigUuid, 'api-generation', clientIp, userAgent);
+        }
         
         return jsonResponse({ configs: generatedConfigs, message: message });
     } catch (e) {
@@ -248,7 +347,7 @@ async function generateConfigs(request, env) {
 }
 
 // 订阅链接生成配置 (GET)
-async function handleGetBatchConfigs(uuid, urlParams, env) {
+async function handleGetBatchConfigs(uuid, urlParams, env, request) {
     if (!uuid) return jsonResponse({ error: 'UUID Required' }, 400);
 
     const baseConfigs = await fetchConfigsByUuidFromDB(uuid, env);
@@ -285,6 +384,11 @@ async function handleGetBatchConfigs(uuid, urlParams, env) {
 
     const body = btoa(filteredConfigs.join('\n'));
 
+    // 记录订阅访问日志
+    const clientIp = getClientIp(request);
+    const userAgent = request.headers.get('user-agent') || 'unknown';
+    await logConfigAccess(env, uuid, 'subscription', clientIp, userAgent);
+
     return new Response(body, {
         status: 200,
         headers: {
@@ -292,6 +396,77 @@ async function handleGetBatchConfigs(uuid, urlParams, env) {
             'Subscription-User-Info': 'upload=0; download=0; total=10737418240000; expire=2524608000',
             'Profile-Update-Interval': '24',
         },
+    });
+}
+
+// =================================================================
+//  ADMIN API (用于后台管理统计)
+// =================================================================
+
+/**
+ * 处理访问统计API请求
+ */
+async function handleAccessStats(request, env, url) {
+    const uuid = url.searchParams.get('uuid');
+    const startDate = url.searchParams.get('start_date');
+    const endDate = url.searchParams.get('end_date');
+    
+    const options = {};
+    if (startDate) options.startDate = startDate;
+    if (endDate) options.endDate = endDate;
+    
+    const stats = await getAccessStats(env, uuid, options);
+    
+    if (!stats.success) {
+        return jsonResponse({ error: `获取统计失败: ${stats.error}` }, 500);
+    }
+    
+    // 计算汇总统计
+    const summary = {
+        total_requests: stats.data.reduce((sum, item) => sum + item.count, 0),
+        unique_uuids: [...new Set(stats.data.map(item => item.uuid))].length,
+        subscription_requests: stats.data
+            .filter(item => item.query_type === 'subscription')
+            .reduce((sum, item) => sum + item.count, 0),
+        api_generation_requests: stats.data
+            .filter(item => item.query_type === 'api-generation')
+            .reduce((sum, item) => sum + item.count, 0)
+    };
+    
+    // 按日期统计
+    const dailyStats = {};
+    stats.data.forEach(item => {
+        if (!dailyStats[item.date]) {
+            dailyStats[item.date] = {
+                total: 0,
+                subscription: 0,
+                api_generation: 0,
+                uuids: new Set()
+            };
+        }
+        dailyStats[item.date].total += item.count;
+        dailyStats[item.date].uuids.add(item.uuid);
+        
+        if (item.query_type === 'subscription') {
+            dailyStats[item.date].subscription += item.count;
+        } else if (item.query_type === 'api-generation') {
+            dailyStats[item.date].api_generation += item.count;
+        }
+    });
+    
+    // 转换为数组格式便于前端显示
+    const dailyStatsArray = Object.entries(dailyStats).map(([date, data]) => ({
+        date,
+        total: data.total,
+        subscription: data.subscription,
+        api_generation: data.api_generation,
+        unique_uuids: data.uuids.size
+    })).sort((a, b) => new Date(b.date) - new Date(a.date)); // 按日期降序
+    
+    return jsonResponse({
+        summary,
+        daily_stats: dailyStatsArray,
+        raw_data: stats.data
     });
 }
 
@@ -328,7 +503,7 @@ export default {
                 // API: Subscription
                 const batchMatch = batchUUID.exec(url);
                 if (batchMatch) {
-                    return await handleGetBatchConfigs(batchMatch.pathname.groups.uuid, url.searchParams, env);
+                    return await handleGetBatchConfigs(batchMatch.pathname.groups.uuid, url.searchParams, env, request);
                 }
 
                 // API: Frontend Fetch (Strictly DB)
@@ -351,6 +526,16 @@ export default {
                 if (path === '/fetch-ips') {
                      const ips = await fetchIpsFromDB(url.searchParams.get('ipType') || 'all', url.searchParams.get('carrierType') || 'all', env);
                      return jsonResponse({ ips: ips.map(i => i.ip), message: `Success` });
+                }
+                
+                // Admin API: 访问统计 (可添加认证机制)
+                if (path === '/admin/stats') {
+                    // 这里可以添加认证逻辑，例如检查API密钥
+                    // const apiKey = url.searchParams.get('api_key');
+                    // if (apiKey !== env.ADMIN_API_KEY) {
+                    //     return jsonResponse({ error: 'Unauthorized' }, 401);
+                    // }
+                    return await handleAccessStats(request, env, url);
                 }
             }
 
@@ -389,7 +574,7 @@ body, html { margin: 0; padding: 0; min-height: 100%; background-color: #fff; fo
 .card h2 { font-size: 1.5rem; color: #3d474d; margin-top: 0; margin-bottom: 20px; text-align: center;}
 .form-group { margin-bottom: 16px; }
 .form-group label { display: block; color: #5a666d; font-weight: 500; margin-bottom: 8px; font-size: 0.9rem;}
-textarea, input[type="text"] { width: 100%; padding: 10px; border: 2px solid #89949B; border-radius: 4px; background: #fff; font-family: 'SF Mono', 'Courier New', monospace; font-size: 0.9rem; box-sizing: border-box; resize: vertical; }
+textarea, input[type="text"] { width: 100%; padding: 10px; border: 2px solid #899idenB; border-radius: 4px; background: #fff; font-family: 'SF Mono', 'Courier New', monospace; font-size: 0.9rem; box-sizing: border-box; resize: vertical; }
 textarea:focus, input[type="text"]:focus { outline: none; border-color: #3d474d; }
 .radio-group { display: flex; flex-wrap: wrap; gap: 10px; }
 .radio-group label { padding: 6px 14px; background: #E8EBED; border: 2px solid #89949B; border-radius: 4px; color: #5a666d; font-size: 0.85rem; cursor: pointer; transition: all 0.3s; }
@@ -420,7 +605,7 @@ const generatePageHtmlContent = `
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="icon" href="https://s3.yangzifun.org/logo.ico" type="image/x-icon">
-  <title>YZFN 优选配置生成 (Read-Only)</title>
+  <title>YZFN 优选配置生成</title>
   <style>${newGlobalStyle}</style>
 </head>
 <body>
@@ -428,7 +613,7 @@ const generatePageHtmlContent = `
   <div class="container">
     <div class="content-group">
       <h1 class="profile-name">CF优选配置批量生成</h1>
-      <p class="profile-quote">支持 IP 优选与域名优选的批量替换工具 (Database Mode)</p>
+      <p class="profile-quote">支持 IP 优选与域名优选的批量替换工具</p>
 
       <div class="nav-grid">
         <a href="/" class="nav-btn primary">批量生成</a>
@@ -497,11 +682,11 @@ const generatePageHtmlContent = `
       <div class="card">
         <h2>3. 生成结果</h2>
         <div id="generatedLinkBox" class="form-group hidden" style="display:none; gap:10px;">
-           <label style="align-self:center; white-space:nowrap; margin-bottom:0; margin-right:5px;">订阅:</label>
-           <input type="text" id="generatedConfigLink" readonly style="margin-bottom:0; color:#5a666d; background-color: #f8f9fa;">
-           <button class="nav-btn" onclick="copyGeneratedLink()" style="white-space: nowrap;">复制</button>
+          <label style="align-self:center; white-space:nowrap; margin-bottom:0; margin-right:5px;">订阅:</label>
+          <input type="text" id="generatedConfigLink" readonly style="margin-bottom:0; color:#5a666d; background-color: #f8f9fa;">
+          <button class="nav-btn" onclick="copyGeneratedLink()" style="white-space: nowrap;">复制</button>
         </div>
-        <textarea id="genResultTextarea" readonly placeholder="点击下方“生成配置”按钮..." rows="8"></textarea>
+        <textarea id="genResultTextarea" readonly placeholder="点击下方"生成配置"按钮..." rows="8"></textarea>
       </div>
 
       <button id="genGenerateButton" class="nav-btn primary" style="width:100%; padding: 12px;" onclick="genGenerateConfigs()">生成配置</button>

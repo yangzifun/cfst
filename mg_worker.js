@@ -57,6 +57,120 @@ function jsonResponse(data, status = 200) {
     });
 }
 
+// 获取访问统计（新增函数）
+async function getAccessStatsSummary(env, days = 30) {
+    try {
+        const db = env.DB;
+        if (!db) throw new Error("D1数据库未绑定。");
+        
+        // 获取总访问统计
+        const totalStats = await db.prepare(
+            'SELECT COUNT(*) as total, COUNT(DISTINCT uuid) as unique_uuids, ' +
+            'SUM(CASE WHEN query_type = "subscription" THEN 1 ELSE 0 END) as subscription_total, ' +
+            'SUM(CASE WHEN query_type = "api-generation" THEN 1 ELSE 0 END) as apigen_total ' +
+            'FROM config_access_logs'
+        ).first();
+        
+        // 获取今日访问统计
+        const today = new Date().toISOString().split('T')[0];
+        const todayStats = await db.prepare(
+            'SELECT COUNT(*) as today_total, ' +
+            'SUM(CASE WHEN query_type = "subscription" THEN 1 ELSE 0 END) as today_subscription, ' +
+            'SUM(CASE WHEN query_type = "api-generation" THEN 1 ELSE 0 END) as today_apigen ' +
+            'FROM config_access_logs WHERE DATE(created_at) = ?'
+        ).bind(today).first();
+        
+        // 获取按日统计（近30天）
+        const startDate = new Date();
+        startDate.setDate(startDate.getDate() - days);
+        const startDateStr = startDate.toISOString().split('T')[0];
+        
+        const dailyStats = await db.prepare(
+            'SELECT DATE(created_at) as date, ' +
+            'COUNT(*) as total, ' +
+            'SUM(CASE WHEN query_type = "subscription" THEN 1 ELSE 0 END) as subscription, ' +
+            'SUM(CASE WHEN query_type = "api-generation" THEN 1 ELSE 0 END) as api_generation, ' +
+            'COUNT(DISTINCT uuid) as unique_uuids ' +
+            'FROM config_access_logs ' +
+            'WHERE DATE(created_at) >= ? ' +
+            'GROUP BY DATE(created_at) ' +
+            'ORDER BY date DESC'
+        ).bind(startDateStr).all();
+        
+        // 获取热门UUID排名
+        const popularUUIDs = await db.prepare(
+            'SELECT uuid, COUNT(*) as access_count, ' +
+            'SUM(CASE WHEN query_type = "subscription" THEN 1 ELSE 0 END) as subscription_count, ' +
+            'SUM(CASE WHEN query_type = "api-generation" THEN 1 ELSE 0 END) as apigen_count ' +
+            'FROM config_access_logs ' +
+            'GROUP BY uuid ' +
+            'ORDER BY access_count DESC ' +
+            'LIMIT 10'
+        ).all();
+        
+        return {
+            success: true,
+            total_requests: totalStats?.total || 0,
+            unique_uuids: totalStats?.unique_uuids || 0,
+            subscription_requests: totalStats?.subscription_total || 0,
+            api_generation_requests: totalStats?.apigen_total || 0,
+            today_total: todayStats?.today_total || 0,
+            today_subscription: todayStats?.today_subscription || 0,
+            today_apigen: todayStats?.today_apigen || 0,
+            daily_stats: dailyStats?.results || [],
+            popular_uuids: popularUUIDs?.results || []
+        };
+    } catch (e) {
+        console.error("获取访问统计失败:", e.message);
+        return { success: false, error: e.message };
+    }
+}
+
+// 获取时间段内的UUID访问详情（新增函数）
+async function getUUIDAccessDetails(env, uuid, startDate, endDate) {
+    try {
+        const db = env.DB;
+        if (!db) throw new Error("D1数据库未绑定。");
+        
+        let query = 'SELECT uuid, query_type, client_ip, user_agent, created_at FROM config_access_logs WHERE uuid = ?';
+        const params = [uuid];
+        
+        if (startDate) {
+            query += ' AND DATE(created_at) >= ?';
+            params.push(startDate);
+        }
+        
+        if (endDate) {
+            query += ' AND DATE(created_at) <= ?';
+            params.push(endDate);
+        }
+        
+        query += ' ORDER BY created_at DESC LIMIT 100';
+        
+        const { results } = await db.prepare(query).bind(...params).all();
+        
+        // 获取该UUID的基本信息
+        const uuidStats = await db.prepare(
+            'SELECT COUNT(*) as total_access, ' +
+            'MIN(created_at) as first_access, ' +
+            'MAX(created_at) as last_access ' +
+            'FROM config_access_logs WHERE uuid = ?'
+        ).bind(uuid).first();
+        
+        return {
+            success: true,
+            uuid: uuid,
+            total_access: uuidStats?.total_access || 0,
+            first_access: uuidStats?.first_access,
+            last_access: uuidStats?.last_access,
+            access_logs: results || []
+        };
+    } catch (e) {
+        console.error(`获取UUID ${uuid} 访问详情失败:`, e.message);
+        return { success: false, error: e.message };
+    }
+}
+
 // =================================================================
 //  3. TOTP实现
 // =================================================================
@@ -646,8 +760,13 @@ async function handleSetAutoUpdateSettings(req, env) {
     }
 }
 
+// 修改handleGetStats函数，添加订阅统计
 async function handleGetStats(req, env) {
     try {
+        const url = new URL(req.url);
+        const days = parseInt(url.searchParams.get('days')) || 30;
+        
+        // 获取基础统计
         const domains = await env.DB.prepare('SELECT COUNT(*) as c FROM cf_domains').first('c');
         const ips = await env.DB.prepare('SELECT COUNT(*) as c FROM cfips').first('c');
         const uuids = await env.DB.prepare('SELECT COUNT(DISTINCT uuid) as c FROM configs').first('c');
@@ -660,13 +779,46 @@ async function handleGetStats(req, env) {
             'SELECT updated_at FROM auto_update_settings WHERE source = ?'
         ).bind('last_executed').first('updated_at');
         
+        // 获取订阅访问统计
+        let accessStats = null;
+        try {
+            accessStats = await getAccessStatsSummary(env, days);
+        } catch (e) {
+            console.error("获取访问统计失败:", e.message);
+            accessStats = { 
+                success: false, 
+                daily_stats: [],
+                popular_uuids: []
+            };
+        }
+        
         return jsonResponse({ 
             domains: domains || 0, 
             ips: ips || 0, 
             uuids: uuids || 0,
             autoUpdate: enabled || 0,
-            lastExecuted: lastExec || 0
+            lastExecuted: lastExec || 0,
+            access_stats: accessStats
         });
+    } catch (error) {
+        return jsonResponse({ error: '服务器错误' }, 500);
+    }
+}
+
+// 新增API：获取单个UUID的访问详情
+async function handleGetUUIDAccessDetails(req, env) {
+    try {
+        const url = new URL(req.url);
+        const uuid = url.searchParams.get('uuid');
+        const startDate = url.searchParams.get('start_date');
+        const endDate = url.searchParams.get('end_date');
+        
+        if (!uuid) {
+            return jsonResponse({ error: '需要提供UUID参数' }, 400);
+        }
+        
+        const details = await getUUIDAccessDetails(env, uuid, startDate, endDate);
+        return jsonResponse(details);
     } catch (error) {
         return jsonResponse({ error: '服务器错误' }, 500);
     }
@@ -909,6 +1061,11 @@ async function handleApi(req, env) {
             return await handleGetStats(req, env);
         }
         
+        // 新增API：获取UUID访问详情
+        if (path === '/api/stats/uuid-details' && method === 'GET') {
+            return await handleGetUUIDAccessDetails(req, env);
+        }
+        
         if (path === '/api/domains' && ['GET', 'POST', 'PUT', 'DELETE'].includes(method)) {
             return await handleDomains(req, env, method);
         }
@@ -1020,6 +1177,28 @@ input:checked + .slider:before { transform: translateX(18px); }
 .totp-input-container { display: flex; gap: 10px; margin: 20px 0; }
 .totp-input { flex: 1; text-align: center; font-size: 1.5rem; letter-spacing: 10px; font-weight: bold; }
 .backup-link { display: block; margin-top: 15px; font-size: 0.9rem; color: #6b7280; text-decoration: underline; cursor: pointer; }
+.chart-container { position: relative; width: 100%; height: 400px; margin: 20px 0; }
+.chart-controls { display: flex; gap: 10px; margin-bottom: 15px; align-items: center; }
+.chart-controls select { padding: 5px 10px; border: 2px solid #89949B; border-radius: 4px; background: #fff; }
+.chart-controls button { padding: 5px 10px; background: #e8ebed; border: 2px solid #89949B; border-radius: 4px; color: #5a666d; cursor: pointer; transition: all 0.2s; }
+.chart-controls button:hover { background: #89949B; color: white; }
+.chart-controls button.active { background: #5a666d; color: white; border-color: #5a666d; }
+.access-stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px; }
+.access-stat-box { background: #f0f4f8; padding: 15px; border-radius: 4px; border-left: 4px solid #3b82f6; }
+.access-stat-num { font-size: 1.8rem; color: #1e3a8a; font-weight: bold; display: block; }
+.access-stat-label { font-size: 0.85rem; color: #4b5563; margin-top: 5px; }
+.access-stat-sub { font-size: 0.75rem; color: #6b7280; margin-top: 3px; }
+.access-detail-table { width: 100%; font-size: 0.85rem; }
+.access-detail-table th { background: #f8fafc; font-weight: 600; }
+.access-detail-table td { padding: 8px 10px; }
+.access-detail-table .type-badge { display: inline-block; padding: 2px 6px; border-radius: 10px; font-size: 0.75rem; font-weight: 500; }
+.type-subscription { background: #dbeafe; color: #1e40af; }
+.type-apigen { background: #d1fae5; color: #065f46; }
+.popular-uuids-list { max-height: 200px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 4px; padding: 10px; }
+.popular-uuids-item { display: flex; justify-content: space-between; padding: 8px; border-bottom: 1px solid #f3f4f6; }
+.popular-uuids-item:last-child { border-bottom: none; }
+.popular-uuids-uuid { font-family: monospace; font-size: 0.85rem; }
+.popular-uuids-count { font-weight: bold; color: #1e40af; }
 `;
 
 const loginHtml = `
@@ -1114,6 +1293,7 @@ const loginHtml = `
     </footer>
     
     <script>
+        // ... 登录页面JavaScript保持不变 ...
         function toast(message, type = 'info') {
             const container = document.getElementById('toast-container');
             const toast = document.createElement('div');
@@ -1335,6 +1515,7 @@ const adminHtml = `
     <link rel="icon" href="https://s3.yangzifun.org/logo.ico">
     <title>优选配置管理后台</title>
     <style>${globalCss}</style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
     <div id="toast-container"></div>
@@ -1361,6 +1542,7 @@ const adminHtml = `
                 <button class="nav-btn" onclick="switchTab('ips', this)">IP 资源池</button>
                 <button class="nav-btn" onclick="switchTab('uuids', this)">配置分组</button>
                 <button class="nav-btn" onclick="switchTab('security', this)">安全中心</button>
+                <button class="nav-btn" onclick="switchTab('analytics', this)">订阅分析</button>
             </div>
 
             <div id="dash" class="card active">
@@ -1370,6 +1552,30 @@ const adminHtml = `
                     <div class="stat-box"><span class="stat-num" id="s-ip">-</span><span class="stat-label">活跃 IP</span></div>
                     <div class="stat-box"><span class="stat-num" id="s-uuid">-</span><span class="stat-label">配置分组</span></div>
                 </div>
+                
+                <div class="access-stat-grid" id="accessStatsGrid" style="display:none;">
+                    <div class="access-stat-box">
+                        <span class="access-stat-num" id="as-total">0</span>
+                        <span class="access-stat-label">总访问次数</span>
+                        <span class="access-stat-sub" id="as-unique">0个独立UUID</span>
+                    </div>
+                    <div class="access-stat-box">
+                        <span class="access-stat-num" id="as-today">0</span>
+                        <span class="access-stat-label">今日访问</span>
+                        <span class="access-stat-sub" id="as-today-split">订阅:0 | 网页:0</span>
+                    </div>
+                    <div class="access-stat-box">
+                        <span class="access-stat-num" id="as-subscription">0</span>
+                        <span class="access-stat-label">订阅访问</span>
+                        <span class="access-stat-sub">通过订阅链接访问</span>
+                    </div>
+                    <div class="access-stat-box">
+                        <span class="access-stat-num" id="as-apigen">0</span>
+                        <span class="access-stat-label">网页生成</span>
+                        <span class="access-stat-sub">通过网页工具生成</span>
+                    </div>
+                </div>
+                
                 <div class="last-update-info">
                     自动更新状态: <span id="autoUpdateStatus">加载中...</span>
                     <br>最后执行时间: <span id="lastExecuted">未知</span>
@@ -1381,6 +1587,49 @@ const adminHtml = `
                 </div>
             </div>
 
+            <div id="analytics" class="card">
+                <h2>📊 订阅访问分析</h2>
+                
+                <div class="chart-controls">
+                    <select id="chartDays" onchange="loadAccessStats()">
+                        <option value="7">最近7天</option>
+                        <option value="14" selected>最近14天</option>
+                        <option value="30">最近30天</option>
+                        <option value="60">最近60天</option>
+                    </select>
+                    <button class="nav-btn active" onclick="loadAccessStats()">刷新数据</button>
+                    <button class="nav-btn" onclick="switchChartType('total')" id="chartTotalBtn">总访问量</button>
+                    <button class="nav-btn" onclick="switchChartType('split')" id="chartSplitBtn">分类统计</button>
+                    <button class="nav-btn" onclick="switchChartType('uuids')" id="chartUuidsBtn">独立用户</button>
+                </div>
+                
+                <div class="chart-container">
+                    <canvas id="accessChart"></canvas>
+                </div>
+                
+                <div style="margin-top: 20px; display: flex; gap: 20px;">
+                    <div style="flex: 1;">
+                        <h3 style="margin-top: 0; font-size: 1.1rem;">热门 UUID 排行</h3>
+                        <div class="popular-uuids-list" id="popularUUIDsList">
+                            <div style="text-align: center; padding: 20px; color: #6b7280;">加载中...</div>
+                        </div>
+                    </div>
+                    
+                    <div style="flex: 2;">
+                        <h3 style="margin-top: 0; font-size: 1.1rem;">访问趋势说明</h3>
+                        <div style="background: #f8fafc; padding: 15px; border-radius: 4px; font-size: 0.9rem; color: #4b5563;">
+                            <p><strong>订阅访问：</strong>用户通过订阅链接（/batch-configs/{uuid}）访问配置</p>
+                            <p><strong>网页生成：</strong>用户通过网页工具（/generate）生成配置</p>
+                            <p><strong>独立用户：</strong>按UUID统计的每日活跃用户数</p>
+                            <p style="margin-top: 10px; color: #6b7280;">
+                                <small>数据统计基于 config_access_logs 表，记录所有UUID配置生成请求</small>
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 其他卡片内容保持不变 -->
             <div id="dom" class="card">
                 <h2>优选域名管理</h2>
                 <div style="display:flex; gap:10px; margin-bottom:15px;">
@@ -1569,7 +1818,7 @@ const adminHtml = `
             </div>
             <div style="display:flex; justify-content:flex-end; gap:10px;">
                 <button class="nav-btn" onclick="document.getElementById('editDomModal').style.display='none'">取消</button>
-                <button class="nav-btn active" onclick="updateDomain()">保存修改</button>
+                                <button class="nav-btn active" onclick="updateDomain()">保存修改</button>
             </div>
         </div>
     </div>
@@ -1625,6 +1874,53 @@ const adminHtml = `
         </div>
     </div>
 
+    <!-- UUID访问详情弹窗 -->
+    <div class="modal-overlay" id="uuidDetailsModal" onclick="event.target===this && (this.style.display='none')">
+        <div class="modal" style="max-width: 800px;">
+            <div style="max-height: 80vh; overflow-y: auto;">
+                <h3 style="margin-top:0; color:#3d474d; position: sticky; top: 0; background: white; padding-bottom: 10px; border-bottom: 1px solid #eee;">📋 UUID访问详情: <span id="modalUUID"></span></h3>
+                
+                <div id="uuidStats" style="margin: 15px 0; font-size: 0.9rem;">
+                    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 15px;">
+                        <div style="background: #f0f4f8; padding: 10px; border-radius: 4px;">
+                            <div style="font-size: 1.2rem; font-weight: bold; color: #1e40af;" id="modalTotalAccess">0</div>
+                            <div style="font-size: 0.8rem; color: #6b7280;">总访问次数</div>
+                        </div>
+                        <div style="background: #f0f4f8; padding: 10px; border-radius: 4px;">
+                            <div style="font-size: 1rem; font-weight: bold; color: #3d474d;" id="modalFirstAccess">-</div>
+                            <div style="font-size: 0.8rem; color: #6b7280;">首次访问</div>
+                        </div>
+                        <div style="background: #f0f4f8; padding: 10px; border-radius: 4px;">
+                            <div style="font-size: 1rem; font-weight: bold; color: #3d474d;" id="modalLastAccess">-</div>
+                            <div style="font-size: 0.8rem; color: #6b7280;">最后访问</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div style="margin: 15px 0;">
+                    <h4 style="margin: 0 0 10px 0; font-size: 1rem;">最近访问记录</h4>
+                    <div style="max-height: 300px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 4px;">
+                        <table class="access-detail-table">
+                            <thead>
+                                <tr>
+                                    <th>时间</th>
+                                    <th>访问类型</th>
+                                    <th>客户端IP</th>
+                                    <th>User Agent</th>
+                                </tr>
+                            </thead>
+                            <tbody id="modalAccessLogs"></tbody>
+                        </table>
+                    </div>
+                </div>
+                
+                <div style="display:flex; justify-content:flex-end; margin-top: 20px;">
+                    <button class="nav-btn active" onclick="document.getElementById('uuidDetailsModal').style.display='none'">关闭</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script>
         const token = localStorage.getItem('token');
         if (!token) window.location.href = '/login';
@@ -1648,6 +1944,15 @@ const adminHtml = `
                 day: '2-digit',
                 hour: '2-digit',
                 minute: '2-digit'
+            });
+        }
+        
+        function fmtShortDate(dateStr) {
+            if (!dateStr) return '';
+            const date = new Date(dateStr);
+            return date.toLocaleDateString('zh-CN', {
+                month: '2-digit',
+                day: '2-digit'
             });
         }
         
@@ -1710,6 +2015,8 @@ const adminHtml = `
         let autoUpdateSettings = { global_enabled: false, hostmonit: true, vps789: true };
         let mfaStatus = { enabled: false, last_login: 0, backup_codes: 0 };
         let currentMfaSecret = '';
+        let accessChart = null;
+        let currentChartType = 'split';
 
         // ============ 初始化 ============
         document.addEventListener('DOMContentLoaded', async function() {
@@ -1770,12 +2077,14 @@ const adminHtml = `
             if (id === 'ips') loadIp();
             if (id === 'uuids') loadUuid();
             if (id === 'security') updateSecurityTab();
+            if (id === 'analytics') loadAccessStats();
         }
 
         // ============ 加载统计信息 ============
         async function loadStats() {
             const data = await api('stats');
             if (data) {
+                // 基础统计
                 document.getElementById('s-dom').innerText = data.domains;
                 document.getElementById('s-ip').innerText = data.ips;
                 document.getElementById('s-uuid').innerText = data.uuids;
@@ -1790,6 +2099,232 @@ const adminHtml = `
                 } else {
                     document.getElementById('lastExecuted').innerText = '从未执行';
                 }
+                
+                // 访问统计
+                if (data.access_stats && data.access_stats.success) {
+                    const stats = data.access_stats;
+                    document.getElementById('accessStatsGrid').style.display = 'grid';
+                    
+                    document.getElementById('as-total').innerText = stats.total_requests;
+                    document.getElementById('as-unique').textContent = stats.unique_uuids + '个独立UUID';
+                    document.getElementById('as-today').innerText = stats.today_total;
+                    document.getElementById('as-today-split').innerHTML = \`订阅:\${stats.today_subscription} | 网页:\${stats.today_apigen}\`;
+                    document.getElementById('as-subscription').innerText = stats.subscription_requests;
+                    document.getElementById('as-apigen').innerText = stats.api_generation_requests;
+                }
+            }
+        }
+
+        // ============ 加载访问统计和图表 ============
+        async function loadAccessStats() {
+            const days = document.getElementById('chartDays').value;
+            const data = await api(\`stats?days=\${days}\`);
+            
+            if (data && data.access_stats && data.access_stats.success) {
+                const stats = data.access_stats;
+                renderAccessChart(stats.daily_stats);
+                renderPopularUUIDs(stats.popular_uuids);
+                updateChartButtons();
+            } else {
+                toast('无法加载访问统计数据', 'error');
+            }
+        }
+        
+        function renderAccessChart(dailyStats) {
+            const ctx = document.getElementById('accessChart').getContext('2d');
+            
+            // 处理数据
+            const dates = dailyStats.map(item => fmtShortDate(item.date)).reverse();
+            const totals = dailyStats.map(item => item.total).reverse();
+            const subscriptions = dailyStats.map(item => item.subscription).reverse();
+            const apigens = dailyStats.map(item => item.api_generation).reverse();
+            const uniqueUUIDS = dailyStats.map(item => item.unique_uuids).reverse();
+            
+            // 销毁现有图表
+            if (accessChart) {
+                accessChart.destroy();
+            }
+            
+            // 创建新图表
+            let datasets = [];
+            
+            switch (currentChartType) {
+                case 'total':
+                    datasets = [{
+                        label: '总访问量',
+                        data: totals,
+                        backgroundColor: '#3b82f6',
+                        borderColor: '#2563eb',
+                        borderWidth: 1
+                    }];
+                    break;
+                    
+                case 'split':
+                    datasets = [
+                        {
+                            label: '订阅访问',
+                            data: subscriptions,
+                            backgroundColor: '#10b981',
+                            borderColor: '#059669',
+                            borderWidth: 1
+                        },
+                        {
+                            label: '网页生成',
+                            data: apigens,
+                            backgroundColor: '#f59e0b',
+                            borderColor: '#d97706',
+                            borderWidth: 1
+                        }
+                    ];
+                    break;
+                    
+                case 'uuids':
+                    datasets = [{
+                        label: '活跃UUID数',
+                        data: uniqueUUIDS,
+                        backgroundColor: '#8b5cf6',
+                        borderColor: '#7c3aed',
+                        borderWidth: 1
+                    }];
+                    break;
+            }
+            
+            accessChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: dates,
+                    datasets: datasets
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                        },
+                        title: {
+                            display: true,
+                            text: '用户订阅访问趋势图'
+                        },
+                        tooltip: {
+                            mode: 'index',
+                            intersect: false
+                        }
+                    },
+                    scales: {
+                        x: {
+                            grid: {
+                                display: false
+                            }
+                        },
+                        y: {
+                            beginAtZero: true,
+                            ticks: {
+                                precision: 0
+                            }
+                        }
+                    },
+                    interaction: {
+                        intersect: false,
+                        mode: 'index'
+                    }
+                }
+            });
+        }
+        
+        function renderPopularUUIDs(uuids) {
+            const container = document.getElementById('popularUUIDsList');
+            
+            if (!uuids || uuids.length === 0) {
+                container.innerHTML = '<div style="text-align: center; padding: 20px; color: #6b7280;">暂无访问数据</div>';
+                return;
+            }
+            
+            let html = '';
+            uuids.forEach((item, index) => {
+                const subscriptionPercent = item.access_count > 0 ? 
+                    Math.round(item.subscription_count / item.access_count * 100) : 0;
+                const apigenPercent = item.access_count > 0 ? 
+                    Math.round(item.apigen_count / item.access_count * 100) : 0;
+                
+                html += \`
+                    <div class="popular-uuids-item" onclick="showUUIDDetails('\${item.uuid}')" style="cursor: pointer;">
+                        <div>
+                            <span class="popular-uuids-uuid" title="\${item.uuid}">\${item.uuid}</span>
+                            <div style="font-size: 0.75rem; color: #6b7280; margin-top: 2px;">
+                                \${subscriptionPercent}%订阅 | \${apigenPercent}%网页
+                            </div>
+                        </div>
+                        <div>
+                            <span class="popular-uuids-count">\${item.access_count}</span>
+                            <span style="font-size: 0.8rem; color: #9ca3af;">次</span>
+                        </div>
+                    </div>
+                \`;
+            });
+            
+            container.innerHTML = html;
+        }
+        
+        function switchChartType(type) {
+            currentChartType = type;
+            updateChartButtons();
+            loadAccessStats(); // 重新加载图表
+        }
+        
+        function updateChartButtons() {
+            document.getElementById('chartTotalBtn').classList.toggle('active', currentChartType === 'total');
+            document.getElementById('chartSplitBtn').classList.toggle('active', currentChartType === 'split');
+            document.getElementById('chartUuidsBtn').classList.toggle('active', currentChartType === 'uuids');
+        }
+        
+        async function showUUIDDetails(uuid) {
+            const modal = document.getElementById('uuidDetailsModal');
+            const modalUUID = document.getElementById('modalUUID');
+            const modalTotalAccess = document.getElementById('modalTotalAccess');
+            const modalFirstAccess = document.getElementById('modalFirstAccess');
+            const modalLastAccess = document.getElementById('modalLastAccess');
+            const modalAccessLogs = document.getElementById('modalAccessLogs');
+            
+            modalUUID.textContent = uuid;
+            modalTotalAccess.textContent = '加载中...';
+            modalFirstAccess.textContent = '-';
+            modalLastAccess.textContent = '-';
+            modalAccessLogs.innerHTML = '<tr><td colspan="4" style="text-align:center; padding:20px;">加载中...</td></tr>';
+            
+            modal.style.display = 'flex';
+            
+            // 加载UUID详情
+            const data = await api(\`stats/uuid-details?uuid=\${encodeURIComponent(uuid)}\`);
+            
+            if (data && data.success) {
+                modalTotalAccess.textContent = data.total_access;
+                modalFirstAccess.textContent = data.first_access ? fmtDate(data.first_access) : '-';
+                modalLastAccess.textContent = data.last_access ? fmtDate(data.last_access) : '-';
+                
+                if (data.access_logs && data.access_logs.length > 0) {
+                    let logsHTML = '';
+                    data.access_logs.forEach(log => {
+                        const typeClass = log.query_type === 'subscription' ? 'type-subscription' : 'type-apigen';
+                        const typeText = log.query_type === 'subscription' ? '订阅' : '网页';
+                        
+                        logsHTML += \`
+                            <tr>
+                                <td>\${fmtDate(log.created_at)}</td>
+                                <td><span class="type-badge \${typeClass}">\${typeText}</span></td>
+                                <td>\${log.client_ip || '未知'}</td>
+                                <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis;" title="\${log.user_agent}">\${log.user_agent || '未知'}</td>
+                            </tr>
+                        \`;
+                    });
+                    modalAccessLogs.innerHTML = logsHTML;
+                } else {
+                    modalAccessLogs.innerHTML = '<tr><td colspan="4" style="text-align:center; padding:20px;">暂无访问记录</td></tr>';
+                }
+            } else {
+                toast('无法加载UUID详情', 'error');
+                modalTotalAccess.textContent = '0';
+                modalAccessLogs.innerHTML = '<tr><td colspan="4" style="text-align:center; padding:20px;">加载失败</td></tr>';
             }
         }
 
@@ -1867,7 +2402,6 @@ const adminHtml = `
                     <div>双重验证: <span style="color:#10b981">已启用</span></div>
                     <div>\${lastLogin}</div>
                     <div>\${backupCount}</div>
-
                 \`;
             } else {
                 mfaBadge.innerHTML = '⚠️ MFA未启用';
@@ -2011,8 +2545,7 @@ const adminHtml = `
                             <button class="nav-btn active" onclick="verifyMfaSetup()">验证并完成</button>
                         </div>
                     </div>
-                </div>
-            \`;
+                \`;
             
             setTimeout(() => {
                 document.getElementById('verifyTOTPInput').focus();

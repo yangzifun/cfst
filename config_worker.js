@@ -1,6 +1,6 @@
 /* =================================================================
- *  Cloudflare Worker: Config Manager + External Link
- *  功能：配置存储、编辑、订阅管理，包含跳转至配置生成的按钮
+ *  Cloudflare Worker: Config Manager + External Link + Analytics
+ *  功能：配置存储、编辑、订阅管理，包含跳转至配置生成的按钮和统计分析
  * ================================================================= */
 
 // =================================================================
@@ -27,7 +27,10 @@ function b64_to_utf8(str) {
 function jsonResponse(data, status = 200) {
     return new Response(JSON.stringify(data, null, 2), {
         status: status,
-        headers: { 'Content-Type': 'application/json;charset=UTF-8' },
+        headers: { 
+            'Content-Type': 'application/json;charset=UTF-8',
+            'Access-Control-Allow-Origin': '*'
+        },
     });
 }
 
@@ -66,6 +69,98 @@ async function fetchConfigsByUuidFromDB(uuid, env) {
         const { results } = await stmt.bind(uuid).all();
         return results;
     } catch (e) { return []; }
+}
+
+// 获取UUID访问统计（新增函数）
+async function fetchUuidAccessStatsFromDB(uuid, env, days = 30) {
+    const db = env.DB;
+    if (!db) return { success: false, error: "数据库未连接" };
+    
+    try {
+        // 检查是否存在访问日志表
+        const tableCheck = await db.prepare(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='config_access_logs'"
+        ).first();
+        
+        if (!tableCheck) {
+            return { 
+                success: false, 
+                error: "访问日志表不存在，请确保已升级到v2.0+版本" 
+            };
+        }
+        
+        // 获取总访问统计
+        const totalStats = await db.prepare(`
+            SELECT 
+                COUNT(*) as total_access,
+                SUM(CASE WHEN query_type = 'subscription' THEN 1 ELSE 0 END) as subscription_count,
+                SUM(CASE WHEN query_type = 'api-generation' THEN 1 ELSE 0 END) as apigen_count,
+                MIN(created_at) as first_access,
+                MAX(created_at) as last_access
+            FROM config_access_logs 
+            WHERE uuid = ?
+        `).bind(uuid).first();
+        
+        // 获取今日访问统计
+        const today = new Date().toISOString().split('T')[0];
+        const todayStats = await db.prepare(`
+            SELECT 
+                COUNT(*) as today_total,
+                SUM(CASE WHEN query_type = 'subscription' THEN 1 ELSE 0 END) as today_subscription,
+                SUM(CASE WHEN query_type = 'api-generation' THEN 1 ELSE 0 END) as today_apigen
+            FROM config_access_logs 
+            WHERE uuid = ? AND DATE(created_at) = ?
+        `).bind(uuid, today).first();
+        
+        // 获取按日统计（最近指定天数）
+        const startDate = new Date();
+        startDate.setDate(startDate.getDate() - days);
+        const startDateStr = startDate.toISOString().split('T')[0];
+        
+        const dailyStats = await db.prepare(`
+            SELECT 
+                DATE(created_at) as date,
+                COUNT(*) as total,
+                SUM(CASE WHEN query_type = 'subscription' THEN 1 ELSE 0 END) as subscription,
+                SUM(CASE WHEN query_type = 'api-generation' THEN 1 ELSE 0 END) as api_generation
+            FROM config_access_logs 
+            WHERE uuid = ? AND DATE(created_at) >= ?
+            GROUP BY DATE(created_at)
+            ORDER BY date ASC
+        `).bind(uuid, startDateStr).all();
+        
+        // 获取最近50条访问记录
+        const recentLogs = await db.prepare(`
+            SELECT 
+                uuid, query_type, client_ip, user_agent, created_at
+            FROM config_access_logs 
+            WHERE uuid = ?
+            ORDER BY created_at DESC
+            LIMIT 50
+        `).bind(uuid).all();
+        
+        return {
+            success: true,
+            uuid: uuid,
+            total_access: totalStats?.total_access || 0,
+            subscription_count: totalStats?.subscription_count || 0,
+            apigen_count: totalStats?.apigen_count || 0,
+            first_access: totalStats?.first_access,
+            last_access: totalStats?.last_access,
+            today_total: todayStats?.today_total || 0,
+            today_subscription: todayStats?.today_subscription || 0,
+            today_apigen: todayStats?.today_apigen || 0,
+            daily_stats: dailyStats?.results || [],
+            recent_logs: recentLogs?.results || []
+        };
+        
+    } catch (e) {
+        console.error("获取UUID访问统计失败:", e.message);
+        return { 
+            success: false, 
+            error: "数据库查询失败: " + e.message 
+        };
+    }
 }
 
 // 订阅输出 (Raw Base64)
@@ -128,6 +223,14 @@ async function handleGetConfigs(uuid, env) {
     return jsonResponse({ uuid, configs: results });
 }
 
+// 新增：获取UUID访问统计API
+async function handleGetUuidStats(uuid, env) {
+    if (!uuid) return jsonResponse({ error: 'UUID Required' }, 400);
+    
+    const stats = await fetchUuidAccessStatsFromDB(uuid, env, 30);
+    return jsonResponse(stats);
+}
+
 async function handleDelete(type, value, env) {
     const sql = type === 'uuid' ? 'DELETE FROM configs WHERE uuid = ?' : 'DELETE FROM configs WHERE id = ?';
     await env.DB.prepare(sql).bind(value).run();
@@ -148,6 +251,7 @@ export default {
         const manageUUID = new URLPattern({ pathname: '/manage/configs/:uuid' });
         const manageID = new URLPattern({ pathname: '/manage/configs/id/:id' });
         const subUUID = new URLPattern({ pathname: '/sub/:uuid' });
+        const uuidStats = new URLPattern({ pathname: '/manage/stats/:uuid' });
 
         try {
             if (method === 'GET') {
@@ -158,6 +262,15 @@ export default {
 
                 const uuidMatch = manageUUID.exec(url);
                 if (uuidMatch) return await handleGetConfigs(uuidMatch.pathname.groups.uuid, env);
+                
+                // 新增：处理UUID统计请求
+                const statsMatch = uuidStats.exec(url);
+                if (statsMatch) {
+                    const urlObj = new URL(request.url);
+                    const days = urlObj.searchParams.get('days') || 30;
+                    const stats = await fetchUuidAccessStatsFromDB(statsMatch.pathname.groups.uuid, env, parseInt(days));
+                    return jsonResponse(stats);
+                }
             }
 
             if (method === 'POST' && path === '/manage/configs') return await handleAddConfig(request, env);
@@ -178,13 +291,13 @@ export default {
 };
 
 // =================================================================
-//  FRONTEND CONTENT (Updated with Link)
+//  FRONTEND CONTENT (Updated with Link and Analytics)
 // =================================================================
 
 const newGlobalStyle = `
 html { font-size: 87.5%; } body, html { margin: 0; padding: 0; min-height: 100%; background-color: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
 .container { width: 100%; min-height: 100vh; display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 40px 20px; box-sizing: border-box; }
-.content-group { width: 100%; max-width: 800px; text-align: center; z-index: 10; box-sizing: border-box; }
+.content-group { width: 100%; max-width: 1000px; text-align: center; z-index: 10; box-sizing: border-box; }
 .profile-name { font-size: 2.2rem; color: #3d474d; margin-bottom: 10px; font-weight: bold;}
 .profile-quote { color: #89949B; margin-bottom: 27px; min-height: 1.2em; }
 .nav-grid { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-bottom: 27px; }
@@ -229,6 +342,30 @@ th { font-weight: bold; color: #3d474d; background-color: #f0f2f5; }
 .edit-field { margin-bottom: 12px; }
 .edit-field label { font-size: 0.85rem; color: #89949B; margin-bottom: 4px; display: block; }
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+/* Statistics Styles */
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px; }
+.stat-box { background: #f0f4f8; padding: 15px; border-radius: 4px; border-left: 4px solid #3b82f6; text-align: center; }
+.stat-num { font-size: 1.8rem; color: #1e40af; font-weight: bold; display: block; }
+.stat-label { font-size: 0.85rem; color: #4b5563; margin-top: 5px; }
+.stat-sub { font-size: 0.75rem; color: #6b7280; margin-top: 3px; }
+.chart-container { position: relative; width: 100%; height: 300px; margin: 20px 0; }
+.chart-controls { display: flex; gap: 10px; margin-bottom: 15px; align-items: center; }
+.chart-controls select { padding: 6px 12px; border: 2px solid #89949B; border-radius: 4px; background: #fff; font-size: 0.9rem; }
+.chart-controls button { padding: 6px 12px; background: #e8ebed; border: 2px solid #89949B; border-radius: 4px; color: #5a666d; cursor: pointer; transition: all 0.2s; font-size: 0.9rem; }
+.chart-controls button:hover { background: #89949B; color: white; }
+.chart-controls button.active { background: #5a666d; color: white; border-color: #5a666d; }
+.access-detail-table { width: 100%; font-size: 0.85rem; border: 1px solid #e5e7eb; border-radius: 4px; overflow: hidden; }
+.access-detail-table th { background: #f8fafc; font-weight: 600; padding: 8px 10px; }
+.access-detail-table td { padding: 8px 10px; border-top: 1px solid #e5e7eb; }
+.type-badge { display: inline-block; padding: 2px 6px; border-radius: 10px; font-size: 0.75rem; font-weight: 500; }
+.type-subscription { background: #dbeafe; color: #1e40af; }
+.type-apigen { background: #d1fae5; color: #065f46; }
+.access-log-container { max-height: 200px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 4px; padding: 10px; margin-top: 10px; }
+.access-log-item { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #f3f4f6; font-size: 0.85rem; }
+.access-log-item:last-child { border-bottom: none; }
+.timestamp { color: #6b7280; font-family: monospace; }
+.log-type { font-weight: 500; }
 `;
 
 const managePageHtmlContent = `
@@ -237,8 +374,9 @@ const managePageHtmlContent = `
 <head>
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
   <link rel="icon" href="https://s3.yangzifun.org/logo.ico" type="image/x-icon">
-  <title>YZFN 配置管理</title>
+  <title>YZFN 配置管理器</title>
   <style>${newGlobalStyle}</style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
   <div id="toast-container"></div>
@@ -312,8 +450,36 @@ const managePageHtmlContent = `
         <div id="queryResultsContainer"></div>
       </div>
 
+      <div id="statsCard" class="card hidden">
+        <h2>3. 访问统计</h2>
+        <div class="chart-controls">
+          <select id="statsDays" onchange="loadUuidStats()">
+            <option value="7">最近7天</option>
+            <option value="14">最近14天</option>
+            <option value="30" selected>最近30天</option>
+            <option value="60">最近60天</option>
+          </select>
+          <button class="nav-btn active" onclick="loadUuidStats()">刷新</button>
+          <button class="nav-btn" onclick="switchChartType('total')" id="chartTotalBtn">总访问</button>
+          <button class="nav-btn" onclick="switchChartType('split')" id="chartSplitBtn">分类统计</button>
+        </div>
+        
+        <div id="statsSummary" class="stat-grid"></div>
+        
+        <div class="chart-container">
+          <canvas id="statsChart"></canvas>
+        </div>
+        
+        <div style="margin-top: 20px;">
+          <h3 style="font-size: 1.1rem; margin: 0 0 10px 0;">最近访问记录</h3>
+          <div id="recentLogs" class="access-log-container">
+            <div style="text-align: center; padding: 20px; color: #6b7280;">加载中...</div>
+          </div>
+        </div>
+      </div>
+
       <div id="addCard" class="card hidden">
-        <h2>3. 添加新节点</h2>
+        <h2>4. 添加新节点</h2>
         <div class="form-group"><textarea id="addConfigData" placeholder="支持批量添加：
 vmess://...
 vless://...
@@ -328,12 +494,35 @@ trojan://..." rows="4"></textarea></div>
   <script>
     const WORKER_DOMAIN = "YOUR_WORKER_DOMAIN_PATH";
     const toastIcons = { success: '✅', error: '❌', info: 'ℹ️' };
+    let currentUuid = '';
+    let statsChart = null;
+    let currentChartType = 'split';
+    
     function showToast(m,t='info'){const c=document.getElementById('toast-container');const x=document.createElement('div');x.className='toast';x.innerHTML=\`<span>\${toastIcons[t]} \${m}</span>\`;c.appendChild(x);setTimeout(()=>x.remove(),4000)}
     function setButtonLoading(b,l,t){if(l){b.ds=b.innerHTML;b.disabled=true;b.innerHTML='...'}else{b.disabled=false;if(b.ds)b.innerHTML=b.ds}}
 
     /* Parser */
     function b64DecodeUnicode(str) { return decodeURIComponent(atob(str).split('').map(c=>'%'+('00'+c.charCodeAt(0).toString(16)).slice(-2)).join('')); }
     function b64EncodeUnicode(str) { return btoa(encodeURIComponent(str).replace(/%([0-9A-F]{2})/g,(m,p1)=>String.fromCharCode(parseInt(p1,16)))); }
+
+    /* Date Formatting */
+    function formatDate(dateStr) {
+      if (!dateStr) return '';
+      const date = new Date(dateStr);
+      const month = (date.getMonth() + 1).toString().padStart(2, '0');
+      const day = date.getDate().toString().padStart(2, '0');
+      return \`\${month}/\${day}\`;
+    }
+    
+    function formatDateTime(dateStr) {
+      if (!dateStr) return '';
+      const date = new Date(dateStr);
+      const month = (date.getMonth() + 1).toString().padStart(2, '0');
+      const day = date.getDate().toString().padStart(2, '0');
+      const hours = date.getHours().toString().padStart(2, '0');
+      const minutes = date.getMinutes().toString().padStart(2, '0');
+      return \`\${month}/\${day} \${hours}:\${minutes}\`;
+    }
 
     /* Modal Logic */
     function openEditModal(config) {
@@ -373,14 +562,225 @@ trojan://..." rows="4"></textarea></div>
         } catch(e) { showToast(e.message,'error'); } finally { setButtonLoading(b,false,o); }
     }
 
+    /* Statistics Functions */
+    async function loadUuidStats() {
+      if (!currentUuid) return;
+      
+      const days = document.getElementById('statsDays').value;
+      try {
+        const response = await fetch(\`/manage/stats/\${currentUuid}?days=\${days}\`);
+        const data = await response.json();
+        
+        if (data.success) {
+          displayStatsSummary(data);
+          renderStatsChart(data.daily_stats);
+          displayRecentLogs(data.recent_logs);
+          updateChartButtons();
+        } else {
+          showToast(data.error || '无法加载统计数据', 'error');
+          document.getElementById('statsSummary').innerHTML = \`
+            <div style="text-align: center; padding: 20px; color: #6b7280;">
+              <p>\${data.error || '无统计信息'}</p>
+              <p><small>请确保已升级到v2.0+版本并启用访问日志记录</small></p>
+            </div>
+          \`;
+        }
+      } catch (error) {
+        showToast('获取统计失败: ' + error.message, 'error');
+      }
+    }
+    
+    function displayStatsSummary(stats) {
+      const container = document.getElementById('statsSummary');
+      
+      const subscriptionPercent = stats.total_access > 0 ? 
+        Math.round(stats.subscription_count / stats.total_access * 100) : 0;
+      const apigenPercent = stats.total_access > 0 ? 
+        Math.round(stats.apigen_count / stats.total_access * 100) : 0;
+      
+      container.innerHTML = \`
+        <div class="stat-box">
+          <span class="stat-num">\${stats.total_access}</span>
+          <span class="stat-label">总访问次数</span>
+          <span class="stat-sub">首次: \${stats.first_access ? formatDate(stats.first_access) : '从未'}</span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-num">\${stats.today_total}</span>
+          <span class="stat-label">今日访问</span>
+          <span class="stat-sub">订阅:\${stats.today_subscription} | 网页:\${stats.today_apigen}</span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-num">\${stats.subscription_count}</span>
+          <span class="stat-label">订阅访问</span>
+          <span class="stat-sub">占比 \${subscriptionPercent}%</span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-num">\${stats.apigen_count}</span>
+          <span class="stat-label">网页生成</span>
+          <span class="stat-sub">占比 \${apigenPercent}%</span>
+        </div>
+      \`;
+    }
+    
+    function renderStatsChart(dailyStats) {
+      const ctx = document.getElementById('statsChart').getContext('2d');
+      
+      // 处理数据
+      const dates = dailyStats.map(item => formatDate(item.date));
+      const totals = dailyStats.map(item => item.total);
+      const subscriptions = dailyStats.map(item => item.subscription);
+      const apigens = dailyStats.map(item => item.api_generation);
+      
+      // 销毁现有图表
+      if (statsChart) {
+        statsChart.destroy();
+      }
+      
+      // 创建新图表
+      let datasets = [];
+      
+      switch (currentChartType) {
+        case 'total':
+          datasets = [{
+            label: '总访问量',
+            data: totals,
+            borderColor: '#3b82f6',
+            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+            borderWidth: 2,
+            fill: true,
+            tension: 0.4
+          }];
+          break;
+          
+        case 'split':
+          datasets = [
+            {
+              label: '订阅访问',
+              data: subscriptions,
+              borderColor: '#10b981',
+              backgroundColor: 'rgba(16, 185, 129, 0.1)',
+              borderWidth: 2,
+              fill: true,
+              tension: 0.4
+            },
+            {
+              label: '网页生成',
+              data: apigens,
+              borderColor: '#f59e0b',
+              backgroundColor: 'rgba(245, 158, 11, 0.1)',
+              borderWidth: 2,
+              fill: true,
+              tension: 0.4
+            }
+          ];
+          break;
+      }
+      
+      statsChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: dates,
+          datasets: datasets
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: {
+              position: 'top',
+            },
+            title: {
+              display: true,
+              text: \`UUID: \${currentUuid.substring(0, 8)}... 访问趋势\`
+            },
+            tooltip: {
+              mode: 'index',
+              intersect: false
+            }
+          },
+          scales: {
+            x: {
+              grid: {
+                display: false
+              },
+              title: {
+                display: true,
+                text: '日期'
+              }
+            },
+            y: {
+              beginAtZero: true,
+              ticks: {
+                precision: 0
+              },
+              title: {
+                display: true,
+                text: '访问次数'
+              }
+            }
+          },
+          interaction: {
+            intersect: false,
+            mode: 'index'
+          }
+        }
+      });
+    }
+    
+    function displayRecentLogs(logs) {
+      const container = document.getElementById('recentLogs');
+      
+      if (!logs || logs.length === 0) {
+        container.innerHTML = '<div style="text-align: center; padding: 20px; color: #6b7280;">暂无访问记录</div>';
+        return;
+      }
+      
+      let html = '';
+      logs.forEach(log => {
+        const typeClass = log.query_type === 'subscription' ? 'type-subscription' : 'type-apigen';
+        const typeText = log.query_type === 'subscription' ? '订阅' : '网页';
+        const userAgentShort = log.user_agent ? 
+          (log.user_agent.length > 30 ? log.user_agent.substring(0, 30) + '...' : log.user_agent) : 
+          '未知';
+        
+        html += \`
+          <div class="access-log-item">
+            <div>
+              <span class="timestamp">\${formatDateTime(log.created_at)}</span>
+              <span class="log-type \${typeClass}">\${typeText}</span>
+            </div>
+            <div style="color: #6b7280; font-size: 0.8rem;" title="\${log.user_agent || '未知'}">
+              \${userAgentShort}
+            </div>
+          </div>
+        \`;
+      });
+      
+      container.innerHTML = html;
+    }
+    
+    function switchChartType(type) {
+      currentChartType = type;
+      updateChartButtons();
+      loadUuidStats(); // 重新加载图表
+    }
+    
+    function updateChartButtons() {
+      document.getElementById('chartTotalBtn').classList.toggle('active', currentChartType === 'total');
+      document.getElementById('chartSplitBtn').classList.toggle('active', currentChartType === 'split');
+    }
+
     /* Main Interaction */
     async function manageQueryByUuid(){
         const b=document.getElementById('queryBtn'); setButtonLoading(b,true);
         const u=document.getElementById('queryUuidInput').value.trim();
         if(!u){ showToast('请输入 UUID','error'); setButtonLoading(b,false,b.innerHTML); return;}
         
+        currentUuid = u;
+        
         // Show sections
         document.getElementById('resultCard').classList.remove('hidden');
+        document.getElementById('statsCard').classList.remove('hidden');
         document.getElementById('addCard').classList.remove('hidden');
         const l=\`\${WORKER_DOMAIN}/sub/\${u}\`; 
         // Modified: Set value to input instead of href/innerText
@@ -402,6 +802,10 @@ trojan://..." rows="4"></textarea></div>
                 });
                 h+='</tbody></table></div>'; c.innerHTML=h;
             }
+            
+            // 加载统计信息
+            await loadUuidStats();
+            
         } catch(e){ showToast(e.message,'error'); } finally{ setButtonLoading(b,false,b.innerHTML); }
     }
     
