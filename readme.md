@@ -2,7 +2,7 @@
 
 # Cloudflare Worker: 代理配置优选工具
 
-![JavaScript](https://img.shields.io/badge/JavaScript-ES6+-yellow?logo=javascript&logoColor=white)![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)![D1 Database](https://img.shields.io/badge/Cloudflare-D1-0052CC?logo=cloudflare&logoColor=white)![MIT License](https://img.shields.io/badge/License-MIT-green.svg)![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=node.js&logoColor=white)![Chart.js](https://img.shields.io/badge/Chart.js-4.0+-FF6384?logo=chart.js&logoColor=white)![Version](https://img.shields.io/badge/Version-2.0-blue.svg)
+![JavaScript](https://img.shields.io/badge/JavaScript-ES6+-yellow?logo=javascript&logoColor=white) ![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)![D1 Database](https://img.shields.io/badge/Cloudflare-D1-0052CC?logo=cloudflare&logoColor=white)  ![MIT License](https://img.shields.io/badge/License-MIT-green.svg) ![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=node.js&logoColor=white)  ![Chart.js](https://img.shields.io/badge/Chart.js-4.0+-FF6384?logo=chart.js&logoColor=white) ![Version](https://img.shields.io/badge/Version-2.0-blue.svg) 
 
 这是一个运行在 Cloudflare Worker 上的多功能代理工具，结合 Cloudflare D1 数据库，提供**IP优选**和**域名优选**的批量替换功能。系统由3个文件组成：**worker.js** - 优选生成器、**config_worker.js** - 配置管理器、**mg_worker.js** - 管理后台。采用三 Worker 架构，分别处理优选生成、配置管理和系统管理，实现功能解耦和独立部署。
 
