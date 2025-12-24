@@ -588,14 +588,6 @@ sequenceDiagram
 - **认证系统**: JWT + TOTP双重验证
 - **通讯协议**: 支持VMess、VLESS、Trojan协议
 
-## 📞 支持与反馈
-
-如有问题或建议，请通过以下方式联系：
-
-- 查看详细文档：https://github.com/your-repo/docs
-- 提交Issue：https://github.com/your-repo/issues
-- 社区讨论：https://discord.gg/your-channel
-
 ---
 
 **免责声明**：本工具仅供学习和研究使用，请遵守当地法律法规，不得用于非法用途。作者不承担任何使用本工具产生的法律责任。
