@@ -54,7 +54,7 @@
 *   按 UUID 分组管理，方便生成不同的订阅
 *   支持配置编辑功能，可修改别名、地址、端口、传输协议等参数
 *   **编辑配置即时返回 [v2.1.1更新]**：修改配置后，API接口会立即返回更新后的完整配置对象，前端无需重新查询即可更新界面显示
-*   提供配置生成器外部链接（"配置生成"按钮），链接到外部配置生成器（https://cfst.api.yangzifun.org）
+*   提供配置生成器外部链接（"配置生成"按钮），链接到外部配置生成器（https://cfst.yangzifun.org）
 *   改进的订阅链接显示方式（使用可复制的输入框）
 *   统一的前端按钮样式
 
@@ -93,7 +93,25 @@
 *   系统统计：实时查看域名、IP、UUID 数量统计
 *   **IP更新职责分离**：IP更新任务由专门的ip-worker.js处理，管理后台仅作为代理
 
-### 10. **安全特性**
+### 10. **IP资源池智能管理 [v2.1新增]**
+
+*   **支持一个IP多个运营商**：同一个IP可以关联多个运营商（如CM、CT、CU等）
+*   **基于IP+运营商组合去重**：使用IP地址和运营商组合作为唯一标识，支持更精细的IP管理
+*   **增量更新机制**：只插入新记录、更新来源信息，智能删除长时间不存在的记录
+*   **详细的统计信息**：提供IP来源分布、运营商统计、IP类型分布等多维度分析
+*   **定时更新任务**：支持通过Cloudflare Workers的Cron Triggers自动更新IP资源池
+*   **手动更新接口**：提供公开的手动更新接口，无需认证即可触发IP更新
+*   **来源追踪**：记录每个IP的具体来源（HostMonit IPv4/IPv6、Vps789等）
+
+### 11. **配置编辑器高级功能**
+
+*   **多协议配置解析器**：支持VMess、VLESS、Trojan、Shadowsocks等多种协议的详细参数编辑
+*   **域名托管属性编辑**：可直接在编辑器中修改配置的域名托管属性（Cloudflare、阿里ESA、腾讯Edgeone等）
+*   **参数验证**：自动验证端口、UUID、传输协议等参数的合法性
+*   **即时预览**：保存后立即在配置列表中显示更新后的配置内容，无需重新查询
+*   **统一编辑界面**：所有协议类型使用统一的编辑界面，简化操作流程
+
+### 12. **安全特性**
 
 *   JWT 认证系统，保障管理后台安全
 *   **MFA双重验证 [v1.4新增]**：
@@ -118,13 +136,36 @@
 
 在 Cloudflare 控制台的 "Workers & Pages" -> "D1" 中创建一个新的数据库（例如命名为 `proxy-db`）。
 
-### 2. 初始化数据库 (SQL)
+### 2. 初始化数据库表单与程序对应关系
 
-进入 D1 数据库的 "Console" 标签页，执行`init_database.sql`中 SQL 语句以创建所需的表结构：
+进入 D1 数据库的 "Console" 标签页，执行 `init_database.sql` 中 SQL 语句以创建所需的表结构。下面是数据库表单与各 Worker 程序的对应关系：
 
-```sql
+| 表单名称 | 用途描述 | 使用此表单的程序 | 是否必需 | 使用状态 |
+|---------|---------|----------------|---------|----------|
+| **configs** | 存储代理配置数据，包括域名托管属性 | `worker.js`, `config_worker.js`, `mg_worker.js` | **必需** | **已使用** |
+| **config_access_logs** | 记录配置访问日志，用于统计分析 | `worker.js`, `config_worker.js`, `mg_worker.js` | **必需** | **已使用** |
+| **admin_users** | 存储管理员账户信息，支持 MFA 双重验证 | `mg_worker.js` | **必需** | **已使用** |
+| **cfips** | 存储优选 IP 地址，支持一个 IP 多个运营商 | `worker.js`, `mg_worker.js`, `ip_worker.js` | **必需** | **已使用** |
+| **cf_domains** | 存储优选域名列表 | `worker.js`, `mg_worker.js` | **必需** | **已使用** |
+| **auto_update_settings** | 存储自动更新配置设置 | `mg_worker.js`, `ip_worker.js` | **必需** | **已使用** |
+| **mfa_backup_codes** | 存储 MFA 备份码 | `mg_worker.js` | **必需** | **已使用** |
+| **system_logs** | 系统操作日志表 | **无** | **可选** | **未使用** |
+| **api_access_stats** | API 访问统计表 | **无** | **可选** | **未使用** |
+| **users** | 用户表（外键引用） | **无** | **可选** | **未使用** |
 
-```
+**说明：**
+- **必需表单**：系统正常运行必须的表单，所有 Worker 程序都会用到
+- **已使用表单**：在当前代码中有实际读写操作的表单
+- **未使用表单**：在 `init_database.sql` 中创建了，但当前代码中没有使用的表单，可选择性创建
+- **程序依赖关系**：
+  - `worker.js`：读取 `configs`, `cfips`, `cf_domains`，写入 `config_access_logs`
+  - `config_worker.js`：读写 `configs`，读取 `config_access_logs`
+  - `mg_worker.js`：读写 `admin_users`, `cf_domains`, `cfips`, `auto_update_settings`, `mfa_backup_codes`，读取 `configs`, `config_access_logs`
+  - `ip_worker.js`：读写 `cfips`, `auto_update_settings`
+
+要初始化数据库，请复制 `init_database.sql` 中的完整 SQL 语句到 D1 Console 中执行：
+
+
 
 ### 3. 创建四个Worker并绑定D1
 
@@ -132,10 +173,10 @@
 
 | Worker名称     | 绑定文件           | 数据库绑定变量 | 建议路由/域名                   |
 | -------------- | ------------------ | -------------- | ------------------------------- |
-| `proxy-main`   | `worker.js`        | `DB`           | `cfst.api.yangzifun.org*`       |
-| `proxy-config` | `config_worker.js` | `DB`           | `config-cfst.api.yangzifun.org` |
-| `proxy-mg`     | `mg_worker.js`     | `DB`           | `mg-cfst.yangzifun.org`         |
-| `proxy-ip`     | `ip-worker.js`     | `DB`           | `ip-cfst.api.yangzifun.org`     |
+| `proxy-main`   | `worker.js`        | `DB`           | `cfst.yangzifun.org*`       |
+| `proxy-config` | `config_worker.js` | `DB`           | `config.proxypilot.yangzifun.org` |
+| `proxy-mg`     | `mg_worker.js`     | `DB`           | `mg.proxypilot.yangzifun.org`         |
+| `proxy-ip`     | `ip-worker.js`     | `DB`           | `ip.proxypilot.yangzifun.org`     |
 
 绑定步骤：
 
