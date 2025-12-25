@@ -1,6 +1,7 @@
 /* =================================================================
- *  Cloudflare Worker: Config Manager + External Link + Analytics
+ *  Cloudflare Worker: Config Manager + External Link + Analytics + Domain Hosting
  *  功能：配置存储、编辑、订阅管理，包含跳转至配置生成的按钮和统计分析
+ *  新增：域名托管属性（Cloudflare、阿里ESA、腾讯Edgeone、AWS Cloudfront、Gcore、Fastly、CacheFly、LightCDN、Vercel、Netlify、无）
  * ================================================================= */
 
 // =================================================================
@@ -73,7 +74,7 @@ async function fetchConfigsByUuidFromDB(uuid, env) {
     const db = env.DB;
     if (!db) return [];
     try {
-        const stmt = db.prepare('SELECT id, config_data, protocol, remark FROM configs WHERE uuid = ? ORDER BY id ASC');
+        const stmt = db.prepare('SELECT id, config_data, protocol, remark, domain_hosting FROM configs WHERE uuid = ? ORDER BY id ASC');
         const { results } = await stmt.bind(uuid).all();
         return results;
     } catch (e) { return []; }
@@ -194,8 +195,16 @@ async function handleRawSubscription(uuid, env) {
 async function handleAddConfig(request, env) {
     let body;
     try { body = await request.json(); } catch (e) { return jsonResponse({ error: '无效 JSON' }, 400); }
-    const { uuid, config_data } = body;
+    const { uuid, config_data, domain_hosting = 'Cloudflare' } = body;
     if (!uuid || !config_data) return jsonResponse({ error: '字段缺失' }, 400);
+    
+    // 验证域名托管参数 - 已扩展列表
+    const validDomainHostings = [
+        'Cloudflare', '阿里ESA', '腾讯Edgeone', 'AWS Cloudfront', 
+        'Gcore', 'Fastly', 'CacheFly', 'LightCDN', 'Vercel', 'Netlify',
+        '无', '其他'
+    ];
+    const hostingValue = validDomainHostings.includes(domain_hosting) ? domain_hosting : 'Cloudflare';
     
     const lines = config_data.split('\n').map(l => l.trim()).filter(Boolean);
     const stmts = [];
@@ -203,7 +212,7 @@ async function handleAddConfig(request, env) {
         const p = getProtocol(line);
         if (p === 'unknown') continue;
         const remark = extractRemarkFromConfig(line, p);
-        stmts.push(env.DB.prepare('INSERT INTO configs (uuid, config_data, protocol, remark, created_at, updated_at) VALUES (?,?,?,?,?,?) ON CONFLICT(uuid,config_data) DO NOTHING').bind(uuid, line, p, remark, Date.now(), Date.now()));
+        stmts.push(env.DB.prepare('INSERT INTO configs (uuid, config_data, protocol, remark, domain_hosting, created_at, updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(uuid,config_data) DO NOTHING').bind(uuid, line, p, remark, hostingValue, Date.now(), Date.now()));
     }
     if (stmts.length === 0) return jsonResponse({ error: '无有效配置' }, 400);
     await env.DB.batch(stmts);
@@ -213,15 +222,23 @@ async function handleAddConfig(request, env) {
 async function handleUpdateConfig(request, env) {
     let body;
     try { body = await request.json(); } catch (e) { return jsonResponse({ error: '无效JSON' }, 400); }
-    const { id, config_data } = body;
+    const { id, config_data, domain_hosting = 'Cloudflare' } = body;
     
     const protocol = getProtocol(config_data);
     if(protocol === 'unknown') return jsonResponse({ error: '不支持的配置格式' }, 400);
     const remark = extractRemarkFromConfig(config_data, protocol);
     
+    // 验证域名托管参数 - 已扩展列表
+    const validDomainHostings = [
+        'Cloudflare', '阿里ESA', '腾讯Edgeone', 'AWS Cloudfront', 
+        'Gcore', 'Fastly', 'CacheFly', 'LightCDN', 'Vercel', 'Netlify',
+        '无', '其他'
+    ];
+    const hostingValue = validDomainHostings.includes(domain_hosting) ? domain_hosting : 'Cloudflare';
+    
     try {
-        const res = await env.DB.prepare('UPDATE configs SET config_data = ?, protocol = ?, remark = ?, updated_at = ? WHERE id = ?')
-            .bind(config_data, protocol, remark, Date.now(), id).run();
+        const res = await env.DB.prepare('UPDATE configs SET config_data = ?, protocol = ?, remark = ?, domain_hosting = ?, updated_at = ? WHERE id = ?')
+            .bind(config_data, protocol, remark, hostingValue, Date.now(), id).run();
         return res.changes > 0 ? jsonResponse({ success: true, message: 'Updated' }) : jsonResponse({ error: '未变更' }, 404);
     } catch(e) { return jsonResponse({ error: e.message }, 500); }
 }
@@ -299,7 +316,7 @@ export default {
 };
 
 // =================================================================
-//  FRONTEND CONTENT (Updated with Link and Analytics)
+//  FRONTEND CONTENT (Updated with Link and Analytics and Domain Hosting)
 // =================================================================
 
 const newGlobalStyle = `
@@ -337,6 +354,29 @@ th, td { padding: 10px 14px; text-align: left; border-bottom: 2px solid #E8EBED;
 th { font-weight: bold; color: #3d474d; background-color: #f0f2f5; }
 .config-data-cell { white-space: normal; word-break: break-all; max-width: 200px; font-size: 0.8rem; color: #666; }
 .actions-cell button { margin-right: 5px; padding: 4px 8px; font-size: 0.8rem; }
+.domain-hosting-cell { font-size: 0.85rem; font-weight: 500; }
+
+/* Domain Hosting Badges - 扩展样式 */
+.hosting-badge { 
+    display: inline-block; 
+    padding: 2px 8px; 
+    border-radius: 12px; 
+    font-size: 0.75rem; 
+    font-weight: 500; 
+    line-height: 1.4;
+}
+.hosting-cloudflare { background: #e6f2ff; color: #0066cc; border: 1px solid #0066cc; }
+.hosting-aliyun { background: #ffe6e6; color: #ff3300; border: 1px solid #ff3300; }
+.hosting-tencent { background: #e6ffe6; color: #00aa00; border: 1px solid #00aa00; }
+.hosting-aws { background: #fff2e6; color: #ff9900; border: 1px solid #ff9900; }
+.hosting-gcore { background: #f0e6ff; color: #6622cc; border: 1px solid #6622cc; }
+.hosting-fastly { background: #e6fffc; color: #008877; border: 1px solid #008877; }
+.hosting-cachefly { background: #fff9e6; color: #cc8800; border: 1px solid #cc8800; }
+.hosting-lightcdn { background: #e6f7ff; color: #0088cc; border: 1px solid #0088cc; }
+.hosting-vercel { background: #000; color: #fff; border: 1px solid #000; }
+.hosting-netlify { background: #00c7b7; color: #fff; border: 1px solid #00c7b7; }
+.hosting-none { background: #f8f9fa; color: #6c757d; border: 1px solid #6c757d; }
+.hosting-other { background: #f0f0f0; color: #666; border: 1px solid #666; }
 
 /* Modal Styles */
 .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 100; display: flex; align-items: center; justify-content: center; opacity: 0; pointer-events: none; transition: opacity 0.3s; }
@@ -350,6 +390,7 @@ th { font-weight: bold; color: #3d474d; background-color: #f0f2f5; }
 .edit-field { margin-bottom: 12px; }
 .edit-field label { font-size: 0.85rem; color: #89949B; margin-bottom: 4px; display: block; }
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
 
 /* Statistics Styles */
 .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px; }
@@ -374,6 +415,24 @@ th { font-weight: bold; color: #3d474d; background-color: #f0f2f5; }
 .access-log-item:last-child { border-bottom: none; }
 .timestamp { color: #6b7280; font-family: monospace; }
 .log-type { font-weight: 500; }
+
+/* Hosting Select Styles */
+.hosting-select { 
+    padding: 8px 12px; 
+    border: 2px solid #89949B; 
+    border-radius: 4px; 
+    background-color: #fff;
+    font-size: 0.9rem;
+    color: #5a666d;
+}
+.hosting-select:focus { 
+    outline: none; 
+    border-color: #3d474d; 
+}
+.hosting-option { 
+    padding: 8px; 
+    font-size: 0.9rem; 
+}
 `;
 
 const managePageHtmlContent = `
@@ -382,7 +441,7 @@ const managePageHtmlContent = `
 <head>
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
   <link rel="icon" href="https://s3.yangzifun.org/logo.ico" type="image/x-icon">
-  <title>YZFN 配置管理器</title>
+  <title>代理配置管理器</title>
   <style>${newGlobalStyle}</style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
@@ -398,9 +457,25 @@ const managePageHtmlContent = `
       </div>
       <div class="modal-body">
         <input type="hidden" id="edit-id"><input type="hidden" id="edit-protocol">
-        <div class="grid-2">
+        <div class="grid-3">
             <div class="edit-field"><label>别名 (Remarks)</label><input type="text" id="edit-ps"></div>
             <div class="edit-field"><label>端口 (Port)</label><input type="number" id="edit-port"></div>
+            <div class="edit-field"><label>域名托管 (Hosting)</label>
+                <select id="edit-domain-hosting" class="hosting-select">
+                    <option value="Cloudflare" class="hosting-option">Cloudflare</option>
+                    <option value="阿里ESA" class="hosting-option">阿里ESA</option>
+                    <option value="腾讯Edgeone" class="hosting-option">腾讯Edgeone</option>
+                    <option value="AWS Cloudfront" class="hosting-option">AWS Cloudfront</option>
+                    <option value="Gcore" class="hosting-option">Gcore</option>
+                    <option value="Fastly" class="hosting-option">Fastly</option>
+                    <option value="CacheFly" class="hosting-option">CacheFly</option>
+                    <option value="LightCDN" class="hosting-option">LightCDN</option>
+                    <option value="Vercel" class="hosting-option">Vercel</option>
+                    <option value="Netlify" class="hosting-option">Netlify</option>
+                    <option value="无" class="hosting-option">无</option>
+                    <option value="其他" class="hosting-option">其他</option>
+                </select>
+            </div>
         </div>
         <div class="edit-field"><label>地址 (Address)</label><input type="text" id="edit-add"></div>
         <div class="edit-field"><label>UUID / Password</label><input type="text" id="edit-id-uuid"></div>
@@ -488,10 +563,34 @@ const managePageHtmlContent = `
 
       <div id="addCard" class="card hidden">
         <h2>4. 添加新节点</h2>
-        <div class="form-group"><textarea id="addConfigData" placeholder="支持批量添加：
+        <div class="form-group">
+          <label>域名托管服务 (Domain Hosting)</label>
+          <select id="domainHostingSelect" class="hosting-select">
+            <option value="Cloudflare" selected>Cloudflare</option>
+            <option value="阿里ESA">阿里ESA</option>
+            <option value="腾讯Edgeone">腾讯Edgeone</option>
+            <option value="AWS Cloudfront">AWS Cloudfront</option>
+            <option value="Gcore">Gcore</option>
+            <option value="Fastly">Fastly</option>
+            <option value="CacheFly">CacheFly</option>
+            <option value="LightCDN">LightCDN</option>
+            <option value="Vercel">Vercel</option>
+            <option value="Netlify">Netlify</option>
+            <option value="无">无</option>
+            <option value="其他">其他</option>
+          </select>
+          <div class="info-box">
+            <strong>说明：</strong> 选择此配置使用的域名托管服务。这有助于管理和分类不同CDN厂商的配置。
+            <br>新增选项：Gcore, Fastly, CacheFly, LightCDN, Vercel, Netlify，"无"表示不使用域名托管。
+          </div>
+        </div>
+        <div class="form-group">
+          <label>配置数据 (可批量添加)</label>
+          <textarea id="addConfigData" placeholder="支持批量添加：
 vmess://...
 vless://...
-trojan://..." rows="4"></textarea></div>
+trojan://..." rows="4"></textarea>
+        </div>
         <button onclick="manageAddConfig()" class="nav-btn primary" style="width:100%">添加到当前 UUID</button>
       </div>
 
@@ -505,6 +604,22 @@ trojan://..." rows="4"></textarea></div>
     let currentUuid = '';
     let statsChart = null;
     let currentChartType = 'split';
+    
+    // 域名托管服务样式映射 - 已扩展
+    const hostingStyleMap = {
+      'Cloudflare': 'hosting-cloudflare',
+      '阿里ESA': 'hosting-aliyun',
+      '腾讯Edgeone': 'hosting-tencent',
+      'AWS Cloudfront': 'hosting-aws',
+      'Gcore': 'hosting-gcore',
+      'Fastly': 'hosting-fastly',
+      'CacheFly': 'hosting-cachefly',
+      'LightCDN': 'hosting-lightcdn',
+      'Vercel': 'hosting-vercel',
+      'Netlify': 'hosting-netlify',
+      '无': 'hosting-none',
+      '其他': 'hosting-other'
+    };
     
     function showToast(m,t='info'){const c=document.getElementById('toast-container');const x=document.createElement('div');x.className='toast';x.innerHTML=\`<span>\${toastIcons[t]} \${m}</span>\`;c.appendChild(x);setTimeout(()=>x.remove(),4000)}
     function setButtonLoading(b,l,t){if(l){b.ds=b.innerHTML;b.disabled=true;b.innerHTML='...'}else{b.disabled=false;if(b.ds)b.innerHTML=b.ds}}
@@ -548,6 +663,11 @@ trojan://..." rows="4"></textarea></div>
         
         document.getElementById('edit-protocol').value = p;
         ['ps','add','port','id-uuid','net','type','host','path','tls','sni'].forEach(k=>document.getElementById('edit-'+k).value='');
+        
+        // 设置域名托管下拉框
+        const hostingSelect = document.getElementById('edit-domain-hosting');
+        hostingSelect.value = config.domain_hosting || 'Cloudflare';
+        
         try {
             if (p === 'vmess') {
                 const c = JSON.parse(b64DecodeUnicode(l.substring(8)));
@@ -571,6 +691,7 @@ trojan://..." rows="4"></textarea></div>
         } catch(e) { alert('解析失败'); return; }
         document.getElementById('editModalOverlay').classList.add('open');
     }
+    
     function closeEditModal() { document.getElementById('editModalOverlay').classList.remove('open'); }
     
     async function saveEditedConfig() {
@@ -586,6 +707,7 @@ trojan://..." rows="4"></textarea></div>
         const path = document.getElementById('edit-path').value;
         const tls = document.getElementById('edit-tls').value;
         const sni = document.getElementById('edit-sni').value;
+        const domainHosting = document.getElementById('edit-domain-hosting').value;
         
         let nL = '';
         if (proto === 'vmess') {
@@ -620,7 +742,11 @@ trojan://..." rows="4"></textarea></div>
             const r = await fetch('/manage/configs', {
                 method: 'PUT',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({id, config_data: nL})
+                body: JSON.stringify({
+                    id, 
+                    config_data: nL,
+                    domain_hosting: domainHosting
+                })
             });
             const result = await r.json();
             if (result.success) {
@@ -868,10 +994,21 @@ trojan://..." rows="4"></textarea></div>
             if(r.status===404){ c.innerHTML='<p style="padding:20px;text-align:center;color:#89949B">未找到配置，请直接添加。</p>'; }
             else {
                 const d=await r.json();
-                let h='<div class="table-container"><table><thead><tr><th>备注</th><th>协议</th><th>配置</th><th>操作</th></tr></thead><tbody>';
+                let h='<div class="table-container"><table><thead><tr><th>备注</th><th>协议</th><th>域名托管</th><th>配置</th><th>操作</th></tr></thead><tbody>';
                 d.configs.forEach(Row=>{
                     const sc = JSON.stringify(Row).replace(/"/g, '&quot;');
-                    h+=\`<tr><td>\${Row.remark||'-'}</td><td>\${Row.protocol}</td><td class="config-data-cell">\${Row.config_data.substring(0,40)}...</td><td class="actions-cell"><button class="nav-btn" data-config="\${sc}" onclick="openEditModal(JSON.parse(this.dataset.config))">编辑</button><button class="nav-btn" style="background:#d44;color:#fff;border-color:#d44" onclick="delOne(\${Row.id})">删除</button></td></tr>\`;
+                    const hosting = Row.domain_hosting || 'Cloudflare';
+                    const hostingClass = hostingStyleMap[hosting] || 'hosting-other';
+                    h+=\`<tr>
+                        <td>\${Row.remark||'-'}</td>
+                        <td>\${Row.protocol}</td>
+                        <td class="domain-hosting-cell"><span class="hosting-badge \${hostingClass}">\${hosting}</span></td>
+                        <td class="config-data-cell">\${Row.config_data.substring(0,40)}...</td>
+                        <td class="actions-cell">
+                            <button class="nav-btn" data-config="\${sc}" onclick="openEditModal(JSON.parse(this.dataset.config))">编辑</button>
+                            <button class="nav-btn" style="background:#d44;color:#fff;border-color:#d44" onclick="delOne(\${Row.id})">删除</button>
+                        </td>
+                    </tr>\`;
                 });
                 h+='</tbody></table></div>'; c.innerHTML=h;
             }
@@ -883,14 +1020,65 @@ trojan://..." rows="4"></textarea></div>
     }
     
     async function manageAddConfig(){
-        const u=document.getElementById('queryUuidInput').value; const d=document.getElementById('addConfigData').value;
-        if(!u||!d) return showToast('UUID或配置为空','error');
-        await fetch('/manage/configs',{method:'POST', body:JSON.stringify({uuid:u,config_data:d})});
-        showToast('添加成功','success'); document.getElementById('addConfigData').value=''; manageQueryByUuid();
+        const u=document.getElementById('queryUuidInput').value; 
+        const d=document.getElementById('addConfigData').value;
+        const hosting = document.getElementById('domainHostingSelect').value;
+        
+        if(!u||!d) {
+            showToast('UUID或配置为空','error');
+            return;
+        }
+        
+        try {
+            const response = await fetch('/manage/configs', {
+                method: 'POST', 
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    uuid: u,
+                    config_data: d,
+                    domain_hosting: hosting
+                })
+            });
+            
+            const result = await response.json();
+            if (result.success) {
+                showToast('添加成功','success'); 
+                document.getElementById('addConfigData').value=''; 
+                manageQueryByUuid();
+            } else {
+                showToast(result.error || '添加失败','error');
+            }
+        } catch (error) {
+            showToast('网络错误: ' + error.message, 'error');
+        }
     }
-    async function delOne(id){ if(confirm('确认删除?')) { await fetch(\`/manage/configs/id/\${id}\`,{method:'DELETE'}); manageQueryByUuid(); } }
-    async function deleteAll(){ const u=document.getElementById('queryUuidInput').value; if(confirm('确认清空所有配置?')) { await fetch(\`/manage/configs/\${u}\`,{method:'DELETE'}); manageQueryByUuid(); } }
-    function copySubLink(){ navigator.clipboard.writeText(document.getElementById('subUrlLink').value).then(()=>showToast('已复制','success')); }
+    
+    async function delOne(id){ 
+        if(confirm('确认删除?')) { 
+            await fetch(\`/manage/configs/id/\${id}\`,{method:'DELETE'}); 
+            manageQueryByUuid(); 
+        } 
+    }
+    
+    async function deleteAll(){ 
+        const u=document.getElementById('queryUuidInput').value; 
+        if(confirm('确认清空所有配置?')) { 
+            await fetch(\`/manage/configs/\${u}\`,{method:'DELETE'}); 
+            manageQueryByUuid(); 
+        } 
+    }
+    
+    function copySubLink(){ 
+        navigator.clipboard.writeText(document.getElementById('subUrlLink').value)
+            .then(()=>showToast('已复制','success'))
+            .catch(()=>showToast('复制失败','error')); 
+    }
+    
+    // 初始化域名托管选择
+    document.addEventListener('DOMContentLoaded', function() {
+        const hostingSelect = document.getElementById('domainHostingSelect');
+        hostingSelect.value = 'Cloudflare';
+    });
   </script>
 </body>
 </html>

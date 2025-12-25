@@ -213,34 +213,46 @@ async function handleGetBatchAddresses(url, env) {
 //  SECTION 2: Config Generation Logic
 // =================================================================
 
-// 读取基础配置 (SELECT)
+// 读取基础配置 (SELECT) - 修改：增加域名托管字段查询
 async function fetchConfigsByUuidFromDB(uuid, env) {
     const db = env.DB;
     if (!db) return [];
     try {
-        const stmt = db.prepare('SELECT config_data FROM configs WHERE uuid = ? ORDER BY id ASC');
+        const stmt = db.prepare('SELECT id, config_data, protocol, remark, domain_hosting FROM configs WHERE uuid = ? ORDER BY id ASC');
         const { results } = await stmt.bind(uuid).all();
-        return results.map(row => row.config_data);
+        return results;  // 返回完整对象，包含domain_hosting字段
     } catch (e) {
         console.error(`Error fetching configs for UUID ${uuid}:`, e.message);
         return [];
     }
 }
 
-// 核心替换逻辑
-function replaceAddressesInConfigs(baseConfigsToProcess, addressList) {
+// 核心替换逻辑 - 修改：确保所有原配置都被输出，但只有Cloudflare配置进行优选替换
+function replaceAddressesInConfigs(baseConfigsData, addressList) {
     let generatedConfigs = [];
     const addressExtractionRegex = /@(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[[0-9a-fA-F:\.]+\]|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})(?::\d+)?(?:[\/?#]|$)/;
     const validAddressRegex = /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[[0-9a-fA-F:\.]+\]|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})$/;
 
-    for (const baseConfig of baseConfigsToProcess) {
-        // 先添加原始配置
-        generatedConfigs.push(baseConfig);
+    for (const configObj of baseConfigsData) {
+        const baseConfig = configObj.config_data;
+        const domainHosting = configObj.domain_hosting || 'Cloudflare'; // 默认为Cloudflare
+        const configId = configObj.id || 0;
+        const remark = configObj.remark || '';
         
         let configType = getProtocol(baseConfig);
         let processedBaseConfig;
         const pushError = (msg) => generatedConfigs.push(`[错误] ${msg}`);
 
+        // 首先，无论域名属性是什么，先输出原配置
+        generatedConfigs.push(baseConfig);
+        
+        // 检查域名托管属性，只有Cloudflare的配置才进行优选替换
+        if (domainHosting !== 'Cloudflare') {
+            // 非Cloudflare配置只输出原配置，不进行优选替换
+            console.log(`配置ID ${configId} 的域名托管属性为"${domainHosting}"，只输出原配置，不进行优选替换`);
+            continue;  // 跳过优选替换循环
+        }
+        
         // 只处理 vmess, vless, trojan 协议
         if (configType === 'trojan' || configType === 'vless') {
             const addressMatch = baseConfig.match(addressExtractionRegex);
@@ -267,40 +279,41 @@ function replaceAddressesInConfigs(baseConfigsToProcess, addressList) {
             continue;
         }
 
-            for (const newAddr of addressList) {
-                if (!validAddressRegex.test(newAddr) && !newAddr.includes(':')) {
-                    // simple validation
+        // 对Cloudflare配置进行优选替换
+        for (const newAddr of addressList) {
+            if (!validAddressRegex.test(newAddr) && !newAddr.includes(':')) {
+                // simple validation
+            }
+            const cleanAddrForName = newAddr.replace(/[\[\]]/g, '');
+            
+            // 处理IPv6地址格式
+            let formattedAddr = newAddr;
+            if (newAddr.includes(':') && !newAddr.startsWith('[') && !newAddr.endsWith(']')) {
+                formattedAddr = `[${newAddr}]`;
+            }
+
+            if (configType === 'trojan' || configType === 'vless') {
+                try {
+                    const url = new URL(processedBaseConfig);
+                    const originalName = url.hash ? decodeURIComponent(url.hash.substring(1)) : `${configType}-node`;
+                    const newName = `${originalName}-${cleanAddrForName}`;
+                    url.hash = encodeURIComponent(newName);
+                    url.hostname = formattedAddr; 
+                    generatedConfigs.push(url.toString());
+                } catch (e) {
+                    pushError(`处理 ${configType} 出错: ${e.message}`);
                 }
-                const cleanAddrForName = newAddr.replace(/[\[\]]/g, '');
+            } else if (configType === 'vmess') {
+                const tempVmessObj = JSON.parse(JSON.stringify(processedBaseConfig));
+                const originalName = tempVmessObj.ps || tempVmessObj.remark || 'vmess-node';
+                tempVmessObj.ps = `${originalName}-${cleanAddrForName}`;
                 
                 // 处理IPv6地址格式
                 let formattedAddr = newAddr;
                 if (newAddr.includes(':') && !newAddr.startsWith('[') && !newAddr.endsWith(']')) {
                     formattedAddr = `[${newAddr}]`;
                 }
-
-                if (configType === 'trojan' || configType === 'vless') {
-                    try {
-                        const url = new URL(processedBaseConfig);
-                        const originalName = url.hash ? decodeURIComponent(url.hash.substring(1)) : `${configType}-node`;
-                        const newName = `${originalName}-${cleanAddrForName}`;
-                        url.hash = encodeURIComponent(newName);
-                        url.hostname = formattedAddr; 
-                    generatedConfigs.push(url.toString());
-                } catch (e) {
-                    pushError(`处理 ${configType} 出错: ${e.message}`);
-                }
-                } else if (configType === 'vmess') {
-                    const tempVmessObj = JSON.parse(JSON.stringify(processedBaseConfig));
-                    const originalName = tempVmessObj.ps || tempVmessObj.remark || 'vmess-node';
-                    tempVmessObj.ps = `${originalName}-${cleanAddrForName}`;
-                    
-                    // 处理IPv6地址格式
-                    let formattedAddr = newAddr;
-                    if (newAddr.includes(':') && !newAddr.startsWith('[') && !newAddr.endsWith(']')) {
-                        formattedAddr = `[${newAddr}]`;
-                    }
-                    tempVmessObj.add = formattedAddr; 
+                tempVmessObj.add = formattedAddr; 
                 if (tempVmessObj.remark) delete tempVmessObj.remark;
 
                 try {
@@ -314,24 +327,42 @@ function replaceAddressesInConfigs(baseConfigsToProcess, addressList) {
     return generatedConfigs;
 }
 
-// 手动 or UUID 生成 (POST)
+// 手动 or UUID 生成 (POST) - 修改：适应新的数据结构
 async function generateConfigs(request, env) {
     try {
         const body = await request.json();
         const addressListText = body.addressList || body.ipList;
         const { baseConfigUuid, baseConfig: baseConfigFromRequest } = body;
         
-        let baseConfigsToProcess = [];
+        let baseConfigsData = [];
 
         if (baseConfigUuid) {
             const configsFromDb = await fetchConfigsByUuidFromDB(baseConfigUuid, env);
             if (configsFromDb.length === 0) {
                 return jsonResponse({ error: `未找到 UUID 为 "${baseConfigUuid}" 的任何基础配置。` }, 404);
             }
-            baseConfigsToProcess = configsFromDb;
+            baseConfigsData = configsFromDb;
+            
+            // 统计域名托管类型
+            const hostingStats = {};
+            configsFromDb.forEach(cfg => {
+                const hosting = cfg.domain_hosting || 'Cloudflare';
+                hostingStats[hosting] = (hostingStats[hosting] || 0) + 1;
+            });
+            console.log(`UUID ${baseConfigUuid} 域名托管统计:`, hostingStats);
+            
         } else if (baseConfigFromRequest) {
-            baseConfigsToProcess = baseConfigFromRequest.split('\n').map(s => s.trim()).filter(Boolean);
-            if (baseConfigsToProcess.length === 0) return jsonResponse({ error: "基础配置不能为空。" }, 400);
+            // 手动粘贴的配置没有domain_hosting信息，全部按照Cloudflare处理（进行优选替换）
+            const configLines = baseConfigFromRequest.split('\n').map(s => s.trim()).filter(Boolean);
+            if (configLines.length === 0) return jsonResponse({ error: "基础配置不能为空。" }, 400);
+            
+            baseConfigsData = configLines.map((config_data, index) => ({
+                id: index,
+                config_data,
+                protocol: getProtocol(config_data),
+                remark: null,
+                domain_hosting: 'Cloudflare' // 手动粘贴的配置默认为Cloudflare，进行优选替换
+            }));
         } else {
             return jsonResponse({ error: "必须提供基础配置或UUID。" }, 400);
         }
@@ -341,12 +372,29 @@ async function generateConfigs(request, env) {
         }
 
         const addressList = addressListText.split('\n').map(a => a.trim()).filter(a => a.length > 0);
-        const generatedConfigs = replaceAddressesInConfigs(baseConfigsToProcess, addressList);
+        const generatedConfigs = replaceAddressesInConfigs(baseConfigsData, addressList);
 
+        // 统计生成结果
+        const totalConfigs = baseConfigsData.length;
+        const cloudflareConfigs = baseConfigsData.filter(cfg => cfg.domain_hosting === 'Cloudflare').length;
+        const otherHostingCount = totalConfigs - cloudflareConfigs;
+        
+        // 计算成功条数（排除错误消息）
         const successCount = generatedConfigs.filter(c => !c.startsWith('[错误]')).length;
         const errorCount = generatedConfigs.length - successCount;
-        let message = `生成完成！成功 ${successCount} 条`;
-        if (errorCount > 0) message += `, 失败 ${errorCount} 条。`;
+        
+        // 计算预期输出条数
+        const expectedNonCloudflare = otherHostingCount; // 每个非Cloudflare配置输出1条原配置
+        const expectedCloudflare = cloudflareConfigs * (addressList.length + 1); // 每个Cloudflare配置输出1条原配置 + addressList.length条优选配置
+        const expectedTotal = expectedNonCloudflare + expectedCloudflare;
+        
+        let message = `生成完成！成功 ${successCount} 条，预期输出 ${expectedTotal} 条`;
+        if (errorCount > 0) message += `，失败 ${errorCount} 条`;
+        
+        // 添加域名托管过滤信息
+        if (otherHostingCount > 0) {
+            message += ` (注：其中有 ${otherHostingCount} 个非Cloudflare配置只输出原配置，${cloudflareConfigs} 个Cloudflare配置进行了优选替换)`;
+        }
         
         // 如果使用UUID生成，记录访问日志
         if (baseConfigUuid) {
@@ -355,19 +403,37 @@ async function generateConfigs(request, env) {
             await logConfigAccess(env, baseConfigUuid, 'api-generation', clientIp, userAgent);
         }
         
-        return jsonResponse({ configs: generatedConfigs, message: message });
+        return jsonResponse({ 
+            configs: generatedConfigs, 
+            message: message,
+            stats: {
+                total_configs: totalConfigs,
+                cloudflare_configs: cloudflareConfigs,
+                other_hosting_configs: otherHostingCount,
+                address_list_count: addressList.length,
+                expected_output: expectedTotal,
+                actual_output: successCount
+            }
+        });
     } catch (e) {
         console.error("生成配置出错:", e.message);
         return jsonResponse({ error: "内部错误: " + e.message }, 500);
     }
 }
 
-// 订阅链接生成配置 (GET)
+// 订阅链接生成配置 (GET) - 修改：适应新的数据结构
 async function handleGetBatchConfigs(uuid, urlParams, env, request) {
     if (!uuid) return jsonResponse({ error: 'UUID Required' }, 400);
 
-    const baseConfigs = await fetchConfigsByUuidFromDB(uuid, env);
-    if (baseConfigs.length === 0) return jsonResponse({ error: `UUID Not Found` }, 404);
+    const baseConfigsData = await fetchConfigsByUuidFromDB(uuid, env);
+    if (baseConfigsData.length === 0) return jsonResponse({ error: `UUID Not Found` }, 404);
+    
+    // 统计数据
+    const totalConfigs = baseConfigsData.length;
+    const cloudflareConfigs = baseConfigsData.filter(cfg => cfg.domain_hosting === 'Cloudflare').length;
+    const otherConfigs = totalConfigs - cloudflareConfigs;
+    
+    console.log(`订阅UUID ${uuid}: 总配置数${totalConfigs}, Cloudflare配置${cloudflareConfigs}, 其他域名托管配置${otherConfigs}`);
 
     const type = urlParams.get('type') || 'ip';
     let addressList = [];
@@ -391,7 +457,7 @@ async function handleGetBatchConfigs(uuid, urlParams, env, request) {
         return jsonResponse({ error: `No valid addresses found for type=${type}` }, 404);
     }
 
-    const generatedConfigs = replaceAddressesInConfigs(baseConfigs, addressList);
+    const generatedConfigs = replaceAddressesInConfigs(baseConfigsData, addressList);
     const filteredConfigs = generatedConfigs.filter(c => !c.startsWith('[错误]'));
 
     if (filteredConfigs.length === 0) {
@@ -411,6 +477,8 @@ async function handleGetBatchConfigs(uuid, urlParams, env, request) {
             'Content-Type': 'text/plain;charset=UTF-8',
             'Subscription-User-Info': 'upload=0; download=0; total=10737418240000; expire=2524608000',
             'Profile-Update-Interval': '24',
+            // 添加域名托管过滤信息头
+            'X-Domain-Hosting-Filter': `Cloudflare=${cloudflareConfigs}, Other=${otherConfigs}`
         },
     });
 }
@@ -590,7 +658,7 @@ body, html { margin: 0; padding: 0; min-height: 100%; background-color: #fff; fo
 .card h2 { font-size: 1.5rem; color: #3d474d; margin-top: 0; margin-bottom: 20px; text-align: center;}
 .form-group { margin-bottom: 16px; }
 .form-group label { display: block; color: #5a666d; font-weight: 500; margin-bottom: 8px; font-size: 0.9rem;}
-textarea, input[type="text"] { width: 100%; padding: 10px; border: 2px solid #899idenB; border-radius: 4px; background: #fff; font-family: 'SF Mono', 'Courier New', monospace; font-size: 0.9rem; box-sizing: border-box; resize: vertical; }
+textarea, input[type="text"] { width: 100%; padding: 10px; border: 2px solid #89949B; border-radius: 4px; background: #fff; font-family: 'SF Mono', 'Courier New', monospace; font-size: 0.9rem; box-sizing: border-box; resize: vertical; }
 textarea:focus, input[type="text"]:focus { outline: none; border-color: #3d474d; }
 .radio-group { display: flex; flex-wrap: wrap; gap: 10px; }
 .radio-group label { padding: 6px 14px; background: #E8EBED; border: 2px solid #89949B; border-radius: 4px; color: #5a666d; font-size: 0.85rem; cursor: pointer; transition: all 0.3s; }
@@ -621,14 +689,14 @@ const generatePageHtmlContent = `
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="icon" href="https://s3.yangzifun.org/logo.ico" type="image/x-icon">
-  <title>YZFN 优选配置生成</title>
+  <title>代理配置生成</title>
   <style>${newGlobalStyle}</style>
 </head>
 <body>
   <div id="toast-container"></div>
   <div class="container">
     <div class="content-group">
-      <h1 class="profile-name">CF优选配置批量生成</h1>
+      <h1 class="profile-name">代理配置批量生成</h1>
       <p class="profile-quote">支持 IP 优选与域名优选的批量替换工具</p>
 
       <div class="nav-grid">
@@ -638,6 +706,13 @@ const generatePageHtmlContent = `
 
       <div class="card">
         <h2>1. 基础配置</h2>
+        <div class="form-group">
+          <div class="info-box">
+            <strong>注意：</strong> 所有配置都会输出原配置。
+            <br>域名托管属性为"Cloudflare"的配置会进行优选替换（每条原配置 + 优选地址数条新配置）。
+            <br>其他域名托管配置（如阿里ESA、腾讯Edgeone、AWS Cloudfront、Gcore、Fastly等）只输出原配置，不进行优选替换。
+          </div>
+        </div>
         <div class="form-group radio-group">
             <label><input type="radio" name="genConfigSource" value="manual" checked><span>手动粘贴</span></label>
             <label><input type="radio" name="genConfigSource" value="uuid"><span>从UUID获取</span></label>
@@ -647,7 +722,8 @@ const generatePageHtmlContent = `
         </div>
         <div id="genUuidConfigInput" class="form-group hidden">
             <input type="text" id="genBaseConfigUuidInput" placeholder="输入已存储的UUID，如 my-configs">
-            <div class="info-box">在 <a href="https://config-cfst.api.yangzifun.org/" target="_blank">配置管理</a> 页面添加和管理UUID。</div>
+            <div class="info-box">在 <a href="https://config-cfst.api.yangzifun.org/" target="_blank">配置管理</a> 页面添加和管理UUID。
+            <br>所有配置都会输出原配置，只有域名托管属性为"Cloudflare"的配置会进行优选替换。</div>
         </div>
       </div>
 
@@ -853,6 +929,11 @@ const generatePageHtmlContent = `
             if (data.configs && Array.isArray(data.configs)) {
                 resultArea.value = data.configs.join('\\n');
                 showToast(data.message || "生成成功", 'success');
+                
+                // 显示统计信息
+                if (data.stats) {
+                    console.log("生成统计:", data.stats);
+                }
             }
         } catch (e) {
             showToast(e.message, 'error');

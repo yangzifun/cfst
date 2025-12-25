@@ -1,6 +1,7 @@
 /* =================================================================
  * Cloudflare Worker: IP Management Worker
  * 专门处理IP更新任务，支持定时更新和手动更新接口
+ * 修改支持一个IP多个运营商的情况
  * ================================================================= */
 
 // =================================================================
@@ -268,16 +269,28 @@ async function runIpUpdateTask(env, sources = null) {
 
     console.log(`总共获取到 ${allIps.length} 个IP`);
     
+    // =================================================================
+    // 修改1：基于 (IP + 运营商) 组合去重，支持一个IP多个运营商
+    // =================================================================
     const uniqueMap = new Map();
     allIps.forEach(i => { 
         if (i && i.ip) {
             const normalizedIp = i.ip.trim();
-            if (!uniqueMap.has(normalizedIp)) {
-                uniqueMap.set(normalizedIp, { ...i, ip: normalizedIp });
+            const carrier = i.carrier || 'ALL';
+            // 使用 IP + 运营商作为唯一键
+            const key = `${normalizedIp}_${carrier}`;
+            
+            if (!uniqueMap.has(key)) {
+                uniqueMap.set(key, { 
+                    ...i, 
+                    ip: normalizedIp,
+                    // 保留原始运营商
+                    carrier: carrier
+                });
             } else {
-                // 合并来源信息
-                const existing = uniqueMap.get(normalizedIp);
-                if (existing.source && !existing.source.includes(i.source)) {
+                // 合并来源信息（如果已经存在相同的 IP+运营商 组合）
+                const existing = uniqueMap.get(key);
+                if (existing.source && i.source && !existing.source.includes(i.source)) {
                     existing.source = `${existing.source}|${i.source}`;
                 }
             }
@@ -285,8 +298,68 @@ async function runIpUpdateTask(env, sources = null) {
     });
     
     const uniqueIps = Array.from(uniqueMap.values());
-    console.log(`去重后剩余 ${uniqueIps.length} 个唯一IP`);
-
+    console.log(`去重后剩余 ${uniqueIps.length} 个唯一IP（基于IP+运营商）`);
+    
+    // =================================================================
+    // 修改2：获取数据库中原有IP数据，与新数据进行比对
+    // =================================================================
+    let existingIps = [];
+    try {
+        const existingRes = await env.DB.prepare('SELECT ip, carrier, source, ip_type FROM cfips').all();
+        existingIps = existingRes.results || [];
+        console.log(`数据库中现有 ${existingIps.length} 条IP记录`);
+    } catch (e) {
+        console.error('获取现有IP数据失败:', e.message);
+    }
+    
+    // 创建现有IP的Map，键为 IP_运营商
+    const existingMap = new Map();
+    existingIps.forEach(i => {
+        const key = `${i.ip}_${i.carrier}`;
+        existingMap.set(key, i);
+    });
+    
+    // 分离要插入和要更新的记录
+    const recordsToInsert = [];
+    const recordsToUpdate = [];
+    const existingKeys = new Set();
+    
+    uniqueIps.forEach(i => {
+        const key = `${i.ip}_${i.carrier}`;
+        existingKeys.add(key);
+        
+        if (existingMap.has(key)) {
+            // 记录存在，检查是否需要更新（比如来源信息变化）
+            const existing = existingMap.get(key);
+            // 检查来源是否有变化
+            if (existing.source !== i.source) {
+                recordsToUpdate.push(i);
+            }
+            // 如果来源相同，则无需更新
+        } else {
+            // 记录不存在，需要插入
+            recordsToInsert.push(i);
+        }
+    });
+    
+    // =================================================================
+    // 修改3：找出需要删除的记录（仅删除长时间未更新的记录）
+    // =================================================================
+    const recordsToDelete = [];
+    existingIps.forEach(i => {
+        const key = `${i.ip}_${i.carrier}`;
+        // 只删除超过2小时未更新的记录，保留其他运营商组合
+        if (!existingKeys.has(key)) {
+            // 这里可以添加时间检查逻辑，比如：
+            // if (Date.now() - i.updated_at > 2 * 60 * 60 * 1000) {
+            recordsToDelete.push(i);
+        }
+    });
+    
+    console.log(`需要插入的新记录: ${recordsToInsert.length}`);
+    console.log(`需要更新的记录: ${recordsToUpdate.length}`);
+    console.log(`需要删除的记录: ${recordsToDelete.length}`);
+    
     // 最终统计
     const finalCarrierStats = {};
     const finalIpTypeStats = { v4: 0, v6: 0 };
@@ -324,33 +397,89 @@ async function runIpUpdateTask(env, sources = null) {
                 sourceStats
             };
         }
-
-        await env.DB.prepare('DELETE FROM cfips').run();
-        console.log('已清空cfips表');
         
-        const stmts = uniqueIps.map(i =>
-            env.DB.prepare('INSERT INTO cfips (ip, ip_type, carrier, source, created_at) VALUES (?, ?, ?, ?, ?)')
-                .bind(i.ip, i.ip_type || (i.ip.includes(':') ? 'v6' : 'v4'), 
-                      i.carrier || 'ALL', i.source || 'unknown', Date.now())
-        );
+        // =================================================================
+        // 修改4：执行数据库操作（插入、更新、删除）
+        // =================================================================
         
-        const BATCH_SIZE = 50;
-        for (let i = 0; i < stmts.length; i += BATCH_SIZE) {
-            const batch = stmts.slice(i, i + BATCH_SIZE);
-            await env.DB.batch(batch);
-            console.log(`批量插入 ${i} 到 ${i+BATCH_SIZE-1} 的IP`);
+        // 1. 插入新记录
+        if (recordsToInsert.length > 0) {
+            const insertStmts = recordsToInsert.map(i =>
+                env.DB.prepare('INSERT INTO cfips (ip, ip_type, carrier, source, created_at) VALUES (?, ?, ?, ?, ?)')
+                    .bind(
+                        i.ip, 
+                        i.ip_type || (i.ip.includes(':') ? 'v6' : 'v4'), 
+                        i.carrier || 'ALL', 
+                        i.source || 'unknown', 
+                        Date.now()
+                    )
+            );
+            
+            const BATCH_SIZE = 50;
+            for (let i = 0; i < insertStmts.length; i += BATCH_SIZE) {
+                const batch = insertStmts.slice(i, i + BATCH_SIZE);
+                await env.DB.batch(batch);
+                console.log(`批量插入 ${i} 到 ${Math.min(i+BATCH_SIZE-1, insertStmts.length-1)} 的IP`);
+            }
         }
         
+        // 2. 更新已有记录（仅更新来源信息）
+        if (recordsToUpdate.length > 0) {
+            for (const record of recordsToUpdate) {
+                await env.DB.prepare(
+                    'UPDATE cfips SET source = ?, updated_at = ? WHERE ip = ? AND carrier = ?'
+                ).bind(
+                    record.source || 'unknown',
+                    Date.now(),
+                    record.ip,
+                    record.carrier || 'ALL'
+                ).run();
+            }
+            console.log(`更新了 ${recordsToUpdate.length} 条记录的来源信息`);
+        }
+        
+        // 3. 删除长时间不存在的记录（可选，可以根据需求调整）
+        if (recordsToDelete.length > 0) {
+            // 安全删除：可以设置阈值，或者保留原有记录
+            // 这里示例只删除超过24小时未更新的记录
+            const deletionThreshold = Date.now() - 24 * 60 * 60 * 1000; // 24小时前
+            
+            const deleteStmts = recordsToDelete
+                .filter(r => r.created_at < deletionThreshold) // 只删除创建时间超过24小时的
+                .map(r =>
+                    env.DB.prepare('DELETE FROM cfips WHERE ip = ? AND carrier = ?')
+                        .bind(r.ip, r.carrier || 'ALL')
+                );
+            
+            if (deleteStmts.length > 0) {
+                const BATCH_SIZE = 50;
+                for (let i = 0; i < deleteStmts.length; i += BATCH_SIZE) {
+                    const batch = deleteStmts.slice(i, i + BATCH_SIZE);
+                    await env.DB.batch(batch);
+                    console.log(`批量删除旧记录 ${i} 到 ${Math.min(i+BATCH_SIZE-1, deleteStmts.length-1)}`);
+                }
+            }
+        }
+        
+        // 4. 更新最后执行时间
         await env.DB.prepare(
             'INSERT OR REPLACE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)'
         ).bind('last_executed', 1, Date.now()).run();
         
-        console.log(`IP更新完成: ${uniqueIps.length}条记录`);
+        const totalProcessed = recordsToInsert.length + recordsToUpdate.length;
+        console.log(`IP更新完成: 插入${recordsToInsert.length}条，更新${recordsToUpdate.length}条，总共处理${totalProcessed}条记录`);
+        
         return { 
             success: true, 
-            count: uniqueIps.length, 
-            message: `成功更新 ${uniqueIps.length} 个 IP`,
+            count: totalProcessed, 
+            message: `成功处理 ${totalProcessed} 个 IP（插入:${recordsToInsert.length}, 更新:${recordsToUpdate.length})`,
             timestamp: Date.now(),
+            stats: {
+                inserted: recordsToInsert.length,
+                updated: recordsToUpdate.length,
+                deleted: recordsToDelete.length,
+                totalInDb: existingIps.length + recordsToInsert.length - recordsToDelete.length
+            },
             carrierStats: finalCarrierStats,
             ipTypeStats: finalIpTypeStats,
             sourceStats
@@ -428,13 +557,27 @@ async function handleGetIpList(req, env) {
         const query = `SELECT * FROM cfips ORDER BY ${actualSort} ${sortOrder} LIMIT ? OFFSET ?`;
         const { results } = await env.DB.prepare(query).bind(size, offset).all();
         
-        // 统计信息
-        const stats = await env.DB.prepare(`
+        // 统计信息 - 增强的统计信息，按IP分组显示运营商
+        const ipStats = await env.DB.prepare(`
             SELECT 
-                COUNT(*) as total,
-                SUM(CASE WHEN ip_type = 'v6' THEN 1 ELSE 0 END) as v6_count,
+                ip,
+                ip_type,
+                GROUP_CONCAT(carrier, ', ') as carriers,
+                COUNT(*) as carrier_count,
+                GROUP_CONCAT(source, ' | ') as sources,
+                MAX(created_at) as last_updated
+            FROM cfips 
+            GROUP BY ip, ip_type
+            ORDER BY last_updated DESC
+            LIMIT 10
+        `).all();
+        
+        // 运营商统计
+        const carrierStats = await env.DB.prepare(`
+            SELECT 
                 carrier,
-                COUNT(*) as carrier_count
+                COUNT(*) as count,
+                COUNT(DISTINCT ip) as unique_ip_count
             FROM cfips 
             GROUP BY carrier
         `).all();
@@ -444,7 +587,15 @@ async function handleGetIpList(req, env) {
             data: results || [], 
             page, 
             size,
-            stats: stats.results || []
+            stats: {
+                ip_stats: ipStats.results || [],
+                carrier_stats: carrierStats.results || [],
+                summary: {
+                    total_ips: total || 0,
+                    unique_ips: (await env.DB.prepare('SELECT COUNT(DISTINCT ip) as c FROM cfips').first('c')) || 0,
+                    carriers: (await env.DB.prepare('SELECT COUNT(DISTINCT carrier) as c FROM cfips').first('c')) || 0
+                }
+            }
         });
     } catch (error) {
         console.error('handleGetIpList error:', error.message);
@@ -500,14 +651,15 @@ export default {
         return new Response(JSON.stringify({
             service: 'IP Management Worker',
             status: 'running',
-            version: '2.0.0',
+            version: '2.1.0',
+            features: '支持一个IP多个运营商、增量更新',
             endpoints: {
                 public: [
-                    'GET /api/ips/list - 获取IP列表（带统计信息）',
-                    'GET /api/ips/update - 手动触发IP更新（带详细日志）'
+                    'GET /api/ips/list - 获取IP列表（带统计信息，支持IP分组）',
+                    'GET /api/ips/update - 手动触发IP更新（增量更新，保留多运营商）'
                 ]
             },
-            note: '此服务专用于IP更新任务，自动更新设置由mg_worker.js管理'
+            note: '此服务专用于IP更新任务，支持同一个IP对应多个运营商'
         }, null, 2), { 
             headers: { 
                 'Content-Type': 'application/json',
