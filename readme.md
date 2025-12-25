@@ -1,4 +1,4 @@
-# Cloudflare Worker: 代理配置优选工具 (v2.2.0更新)
+# 代理配置管理优选工具 
 
 ![JavaScript](https://img.shields.io/badge/JavaScript-ES6+-yellow?logo=javascript&logoColor=white) ![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)![D1 Database](https://img.shields.io/badge/Cloudflare-D1-0052CC?logo=cloudflare&logoColor=white)  ![MIT License](https://img.shields.io/badge/License-MIT-green.svg) ![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=node.js&logoColor=white)  ![Chart.js](https://img.shields.io/badge/Chart.js-4.0+-FF6384?logo=chart.js&logoColor=white) ![Version](https://img.shields.io/badge/Version−2.2.0-blue.svg)
 
