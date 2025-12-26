@@ -1534,6 +1534,28 @@ input:checked + .slider:before { transform: translateX(18px); }
 .popular-uuids-item:last-child { border-bottom: none; }
 .popular-uuids-uuid { font-family: monospace; font-size: 0.85rem; }
 .popular-uuids-count { font-weight: bold; color: #1e40af; }
+
+/* Domain Hosting Badges - 扩展样式 */
+.hosting-badge { 
+    display: inline-block; 
+    padding: 2px 8px; 
+    border-radius: 12px; 
+    font-size: 0.75rem; 
+    font-weight: 500; 
+    line-height: 1.4;
+}
+.hosting-cloudflare { background: #F6821F; color: #fff; border: 1px solid #F6821F; }
+.hosting-aliyun { background: #FE6A00; color: #fff; border: 1px solid #FE6A00; }
+.hosting-tencent { background: #4A86FF; color: #fff; border: 1px solid #4A86FF; }
+.hosting-aws { background: #232B37; color: #fff; border: 1px solid #232B37; }
+.hosting-gcore { background: #FF4C00; color: #fff; border: 1px solid #FF4C00; }
+.hosting-fastly { background: #F7272C; color: #fff; border: 1px solid #F7272C; }
+.hosting-cachefly { background: #391376; color: #fff; border: 1px solid #391376; }
+.hosting-lightcdn { background: #F78B2C; color: #fff; border: 1px solid #F78B2C; }
+.hosting-vercel { background: #000; color: #fff; border: 1px solid #000; }
+.hosting-netlify { background: #05B7B5; color: #fff; border: 1px solid #05B7B5; }
+.hosting-none { background: #f8f9fa; color: #6c757d; border: 1px solid #6c757d; }
+.hosting-other { background: #f0f0f0; color: #666; border: 1px solid #666; }
 `;
 
 const loginHtml = `
