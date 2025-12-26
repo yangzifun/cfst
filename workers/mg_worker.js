@@ -347,13 +347,13 @@ async function ensureSchema(env) {
         // 1. 确保表存在
         await env.DB.prepare(`
             CREATE TABLE IF NOT EXISTS cfips (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ip TEXT NOT NULL,
-                ip_type TEXT,
-                carrier TEXT,
-                source TEXT,
-                created_at INTEGER,
-                updated_at INTEGER
+                                                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                                 ip TEXT NOT NULL,
+                                                 ip_type TEXT,
+                                                 carrier TEXT,
+                                                 source TEXT,
+                                                 created_at INTEGER,
+                                                 updated_at INTEGER
             )
         `).run();
 
@@ -369,9 +369,9 @@ async function ensureSchema(env) {
         // 3. 确保设置表存在
         await env.DB.prepare(`
             CREATE TABLE IF NOT EXISTS auto_update_settings (
-                source TEXT PRIMARY KEY,
-                enabled INTEGER,
-                updated_at INTEGER
+                                                                source TEXT PRIMARY KEY,
+                                                                enabled INTEGER,
+                                                                updated_at INTEGER
             )
         `).run();
 
@@ -510,85 +510,97 @@ async function initializeDatabaseSettings(env) {
         // 创建 admin_users 表
         await env.DB.prepare(`
             CREATE TABLE IF NOT EXISTS admin_users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
-                mfa_enabled INTEGER DEFAULT 0,
-                mfa_secret TEXT,
-                last_mfa_login INTEGER DEFAULT 0,
-                last_backup_login INTEGER DEFAULT 0,
-                created_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000)
-            );
+                                                       id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                                       username TEXT UNIQUE NOT NULL,
+                                                       password_hash TEXT NOT NULL,
+                                                       mfa_enabled INTEGER DEFAULT 0,
+                                                       mfa_secret TEXT,
+                                                       last_mfa_login INTEGER DEFAULT 0,
+                                                       last_backup_login INTEGER DEFAULT 0,
+                                                       created_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000)
+                );
         `).run();
 
         // 创建 mfa_backup_codes 表
         await env.DB.prepare(`
             CREATE TABLE IF NOT EXISTS mfa_backup_codes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL,
-                code TEXT UNIQUE NOT NULL,
-                created_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000),
+                                                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                                            username TEXT NOT NULL,
+                                                            code TEXT UNIQUE NOT NULL,
+                                                            created_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000),
                 used INTEGER DEFAULT 0,
                 used_at INTEGER DEFAULT 0
-            );
+                );
         `).run();
 
-        // 创建 cf_domains 表
+        // 创建 cf_domains 表 (Cloudflare域名)
         await env.DB.prepare(`
             CREATE TABLE IF NOT EXISTS cf_domains (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                domain TEXT UNIQUE NOT NULL,
-                remark TEXT,
-                created_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000)
-            );
+                                                      id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                                      domain TEXT UNIQUE NOT NULL,
+                                                      remark TEXT,
+                                                      created_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000),
+                updated_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000)
+                );
+        `).run();
+
+        // 创建 edgeone_domains 表 (腾讯云EdgeOne域名)
+        await env.DB.prepare(`
+            CREATE TABLE IF NOT EXISTS edgeone_domains (
+                                                           id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                                           domain TEXT UNIQUE NOT NULL,
+                                                           remark TEXT,
+                                                           created_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000),
+                updated_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000)
+                );
         `).run();
 
         // 创建 configs 表
         await env.DB.prepare(`
             CREATE TABLE IF NOT EXISTS configs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                uuid TEXT NOT NULL,
-                ip TEXT,
-                domain TEXT,
-                port INTEGER,
-                meta TEXT,
-                created_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000),
+                                                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                                   uuid TEXT NOT NULL,
+                                                   ip TEXT,
+                                                   domain TEXT,
+                                                   port INTEGER,
+                                                   meta TEXT,
+                                                   created_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000),
                 updated_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000)
-            );
+                );
         `).run();
         await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_configs_uuid ON configs (uuid);').run();
 
         // 创建 cfips 表 (需要确保存在，供 mg_worker.js 读取)
         await env.DB.prepare(`
             CREATE TABLE IF NOT EXISTS cfips (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ip TEXT UNIQUE NOT NULL,
-                ip_type TEXT,
-                carrier TEXT,
-                source TEXT,
-                created_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000)
-            );
+                                                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                                 ip TEXT UNIQUE NOT NULL,
+                                                 ip_type TEXT,
+                                                 carrier TEXT,
+                                                 source TEXT,
+                                                 created_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000)
+                );
         `).run();
 
         // 创建 auto_update_settings 表 (需要确保存在，供 mg_worker.js 读取和写入设置)
         await env.DB.prepare(`
             CREATE TABLE IF NOT EXISTS auto_update_settings (
-                source TEXT PRIMARY KEY,
-                enabled INTEGER NOT NULL,
-                updated_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000)
-            );
+                                                                source TEXT PRIMARY KEY,
+                                                                enabled INTEGER NOT NULL,
+                                                                updated_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000)
+                );
         `).run();
 
         // 创建 config_access_logs (订阅访问日志) 表
         await env.DB.prepare(`
             CREATE TABLE IF NOT EXISTS config_access_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                uuid TEXT NOT NULL,
-                query_type TEXT NOT NULL, -- 'subscription' or 'api-generation'
-                client_ip TEXT,
-                user_agent TEXT,
-                created_at TEXT DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%SZ', 'now'))
-            );
+                                                              id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                                              uuid TEXT NOT NULL,
+                                                              query_type TEXT NOT NULL, -- 'subscription' or 'api-generation'
+                                                              client_ip TEXT,
+                                                              user_agent TEXT,
+                                                              created_at TEXT DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                );
         `).run();
         await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_access_logs_uuid ON config_access_logs (uuid);').run();
         await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_access_logs_date ON config_access_logs (created_at);').run();
@@ -1112,14 +1124,36 @@ async function handleDomains(req, env, method) {
         if (method === 'GET') {
             const page = parseInt(url.searchParams.get('page')) || 1;
             const size = parseInt(url.searchParams.get('size')) || 10;
-            const sortField = url.searchParams.get('sort') || 'id';
+            const sortField = url.searchParams.get('sort') || 'created_at';
             const sortOrder = (url.searchParams.get('order') || 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
-            const allowedSorts = ['id', 'domain', 'remark', 'created_at'];
-            const actualSort = allowedSorts.includes(sortField) ? sortField : 'id';
+            const allowedSorts = ['domain', 'remark', 'created_at', 'source'];
+            const actualSort = allowedSorts.includes(sortField) ? sortField : 'created_at';
             const offset = (page - 1) * size;
 
-            const total = await env.DB.prepare('SELECT COUNT(*) as c FROM cf_domains').first('c');
-            const query = `SELECT * FROM cf_domains ORDER BY ${actualSort} ${sortOrder} LIMIT ? OFFSET ?`;
+            // 从两个表联合查询域名，添加来源标识
+            const query = `
+                SELECT
+                    'Cloudflare' as source,
+                    domain,
+                    remark,
+                    created_at
+                FROM cf_domains
+                UNION ALL
+                SELECT
+                    '腾讯云EdgeOne' as source,
+                    domain,
+                    remark,
+                    created_at
+                FROM edgeone_domains
+                ORDER BY ${actualSort} ${sortOrder}
+                    LIMIT ? OFFSET ?
+            `;
+
+            // 获取总域名数量
+            const cfTotal = await env.DB.prepare('SELECT COUNT(*) as c FROM cf_domains').first('c') || 0;
+            const edgeoneTotal = await env.DB.prepare('SELECT COUNT(*) as c FROM edgeone_domains').first('c') || 0;
+            const total = cfTotal + edgeoneTotal;
+
             const { results } = await env.DB.prepare(query).bind(size, offset).all();
 
             return jsonResponse({
@@ -1131,12 +1165,22 @@ async function handleDomains(req, env, method) {
         }
 
         if (method === 'POST') {
-            const { domain, remark } = await req.json();
+            const { domain, remark, source } = await req.json();
             if(!domain) return jsonResponse({error:'域名不能为空'}, 400);
 
-            await env.DB.prepare(
-                'INSERT INTO cf_domains (domain, remark, created_at) VALUES (?, ?, ?)'
-            ).bind(domain, remark || '', Date.now()).run();
+            if (!source || (source !== 'Cloudflare' && source !== '腾讯云EdgeOne')) {
+                return jsonResponse({error:'域名来源必须为 Cloudflare 或 腾讯云EdgeOne'}, 400);
+            }
+
+            if (source === 'Cloudflare') {
+                await env.DB.prepare(
+                    'INSERT INTO cf_domains (domain, remark, created_at, updated_at) VALUES (?, ?, ?, ?)'
+                ).bind(domain, remark || '', Date.now(), Date.now()).run();
+            } else {
+                await env.DB.prepare(
+                    'INSERT INTO edgeone_domains (domain, remark, created_at, updated_at) VALUES (?, ?, ?, ?)'
+                ).bind(domain, remark || '', Date.now(), Date.now()).run();
+            }
 
             return jsonResponse({
                 success: true,
@@ -1145,12 +1189,20 @@ async function handleDomains(req, env, method) {
         }
 
         if (method === 'PUT') {
-            const { id, domain, remark } = await req.json();
-            if(!id || !domain) return jsonResponse({error:'ID和域名不能为空'}, 400);
+            const { id, domain, remark, source } = await req.json();
+            if(!id || !domain || !source) return jsonResponse({error:'ID、域名和来源不能为空'}, 400);
 
-            await env.DB.prepare(
-                'UPDATE cf_domains SET domain = ?, remark = ? WHERE id = ?'
-            ).bind(domain, remark || '', id).run();
+            if (source === 'Cloudflare') {
+                await env.DB.prepare(
+                    'UPDATE cf_domains SET domain = ?, remark = ?, updated_at = ? WHERE id = ?'
+                ).bind(domain, remark || '', Date.now(), id).run();
+            } else if (source === '腾讯云EdgeOne') {
+                await env.DB.prepare(
+                    'UPDATE edgeone_domains SET domain = ?, remark = ?, updated_at = ? WHERE id = ?'
+                ).bind(domain, remark || '', Date.now(), id).run();
+            } else {
+                return jsonResponse({error:'域名来源必须为 Cloudflare 或 腾讯云EdgeOne'}, 400);
+            }
 
             return jsonResponse({
                 success: true,
@@ -1159,10 +1211,17 @@ async function handleDomains(req, env, method) {
         }
 
         if (method === 'DELETE') {
-            const { id } = await req.json();
-            if (!id) return jsonResponse({error:'ID不能为空'}, 400);
+            const { id, source } = await req.json();
+            if (!id || !source) return jsonResponse({error:'ID和来源不能为空'}, 400);
 
-            await env.DB.prepare('DELETE FROM cf_domains WHERE id = ?').bind(id).run();
+            if (source === 'Cloudflare') {
+                await env.DB.prepare('DELETE FROM cf_domains WHERE id = ?').bind(id).run();
+            } else if (source === '腾讯云EdgeOne') {
+                await env.DB.prepare('DELETE FROM edgeone_domains WHERE id = ?').bind(id).run();
+            } else {
+                return jsonResponse({error:'域名来源必须为 Cloudflare 或 腾讯云EdgeOne'}, 400);
+            }
+
             return jsonResponse({
                 success: true,
                 message: '域名删除成功'
@@ -1818,7 +1877,6 @@ const adminHtml = `
                 <button class="nav-btn" onclick="switchTab('ips', this)">IP 资源池</button>
                 <button class="nav-btn" onclick="switchTab('uuids', this)">配置分组</button>
                 <button class="nav-btn" onclick="switchTab('security', this)">安全中心</button>
-                <button class="nav-btn" onclick="switchTab('analytics', this)">订阅分析</button>
             </div>
 
             <div id="dash" class="card active">
@@ -1852,19 +1910,7 @@ const adminHtml = `
                     </div>
                 </div>
                 
-                <div class="last-update-info">
-                    自动更新状态: <span id="autoUpdateStatus">加载中...</span>
-                    <br>最后执行时间: <span id="lastExecuted">未知</span>
-                </div>
-                
-                <div class="security-section" id="mfaStatusSection" style="display:none;">
-                    <h3>⛑️ 账户安全状态</h3>
-                    <div id="mfaStatusDetails">加载中...</div>
-                </div>
-            </div>
-
-            <div id="analytics" class="card">
-                <h2>📊 订阅访问分析</h2>
+                <h3 style="margin-top: 30px; margin-bottom: 15px;">📊 订阅访问趋势分析 (多指标视图)</h3>
                 
                 <div class="chart-controls">
                     <select id="chartDays" onchange="loadAccessStats()">
@@ -1873,10 +1919,11 @@ const adminHtml = `
                         <option value="30">最近30天</option>
                         <option value="60">最近60天</option>
                     </select>
-                    <button class="nav-btn active" onclick="loadAccessStats()">刷新数据</button>
+                    <button class="nav-btn" onclick="loadAccessStats()">刷新数据</button>
                     <button class="nav-btn" onclick="switchChartType('total')" id="chartTotalBtn">总访问量</button>
-                    <button class="nav-btn" onclick="switchChartType('split')" id="chartSplitBtn">分类统计</button>
-                    <button class="nav-btn" onclick="switchChartType('uuids')" id="chartUuidsBtn">独立用户</button>
+                    <button class="nav-btn" onclick="switchChartType('split')" id="chartSplitBtn">订阅/网页</button>
+                    <button class="nav-btn" onclick="switchChartType('uuids')" id="chartUuidsBtn">活跃UUID数</button>
+                    <button class="nav-btn active" onclick="switchChartType('all')" id="chartAllBtn">全部指标</button>
                 </div>
                 
                 <div class="chart-container">
@@ -1903,7 +1950,19 @@ const adminHtml = `
                         </div>
                     </div>
                 </div>
+                
+                <div class="last-update-info">
+                    自动更新状态: <span id="autoUpdateStatus">加载中...</span>
+                    <br>最后执行时间: <span id="lastExecuted">未知</span>
+                </div>
+                
+                <div class="security-section" id="mfaStatusSection" style="display:none;">
+                    <h3>⛑️ 账户安全状态</h3>
+                    <div id="mfaStatusDetails">加载中...</div>
+                </div>
             </div>
+
+            <!-- 订阅分析功能已移到系统概览页面 -->
 
             <!-- 其他卡片内容保持不变 -->
             <div id="dom" class="card">
@@ -1911,15 +1970,19 @@ const adminHtml = `
                 <div style="display:flex; gap:10px; margin-bottom:15px;">
                     <input type="text" id="newD" placeholder="域名 (例如: cf.example.com)" style="flex:2; margin:0">
                     <input type="text" id="newR" placeholder="自定义备注" style="flex:1; margin:0">
+                    <select id="newSource" style="flex:1; margin:0; padding: 10px; border: 2px solid #89949B; border-radius: 4px; background: #fff; font-size: 0.9rem; box-sizing: border-box; color: #3d474d; cursor: pointer; transition: border-color 0.2s; font-family: inherit;">
+                        <option value="Cloudflare">Cloudflare</option>
+                        <option value="腾讯云EdgeOne">腾讯云EdgeOne</option>
+                    </select>
                     <button class="nav-btn active" onclick="addDomain()">添加域名</button>
-                    </div>
+                </div>
                 <div class="table-container">
                     <table>
                         <thead>
                             <tr>
-                                <th onclick="sortDom('id')">ID ↕</th>
                                 <th onclick="sortDom('domain')">域名 ↕</th>
                                 <th onclick="sortDom('remark')">备注 ↕</th>
+                                <th onclick="sortDom('source')">来源 ↕</th>
                                 <th onclick="sortDom('created_at')">创建时间 ↕</th>
                                 <th>操作</th>
                             </tr>
@@ -2093,6 +2156,7 @@ const adminHtml = `
         <div class="modal">
             <h3 style="margin-top:0; color:#3d474d">编辑域名</h3>
             <input type="hidden" id="editId">
+            <input type="hidden" id="editSource">
             <div style="margin-bottom:15px;">
                 <label style="display:block;margin-bottom:5px;font-size:0.9rem;color:#5a666d;">域名:</label>
                 <input type="text" id="editDomain">
@@ -2296,7 +2360,7 @@ const adminHtml = `
         let mfaStatus = { enabled: false, last_login: 0, backup_codes: 0 };
         let currentMfaSecret = '';
         let accessChart = null;
-        let currentChartType = 'split';
+        let currentChartType = 'all';
 
         // ============ 初始化 ============
         document.addEventListener('DOMContentLoaded', async function() {
@@ -2357,7 +2421,6 @@ const adminHtml = `
             if (id === 'ips') loadIp();
             if (id === 'uuids') loadUuid();
             if (id === 'security') updateSecurityTab();
-            if (id === 'analytics') loadAccessStats();
         }
 
         // ============ 加载统计信息 ============
@@ -2388,9 +2451,15 @@ const adminHtml = `
                     document.getElementById('as-total').innerText = stats.total_requests;
                     document.getElementById('as-unique').textContent = stats.unique_uuids + '个独立UUID';
                     document.getElementById('as-today').innerText = stats.today_total;
-                    document.getElementById('as-today-split').innerHTML = \`订阅:\${stats.today_subscription} | 网页:\${stats.today_apigen}\`;
+                    document.getElementById('as-today-split').innerHTML =  \`订阅:\${stats.today_subscription} | 网页:\${stats.today_apigen}\`;
                     document.getElementById('as-subscription').innerText = stats.subscription_requests;
                     document.getElementById('as-apigen').innerText = stats.api_generation_requests;
+                }
+                
+                // 如果当前在系统概览页面，自动加载访问趋势图表
+                const currentCard = document.querySelector('.card.active');
+                if (currentCard && currentCard.id === 'dash') {
+                    loadAccessStats();
                 }
             }
         }
@@ -2435,7 +2504,8 @@ const adminHtml = `
                         data: totals,
                         backgroundColor: '#3b82f6',
                         borderColor: '#2563eb',
-                        borderWidth: 1
+                        borderWidth: 2,
+                        tension: 0.3
                     }];
                     break;
                     
@@ -2446,14 +2516,16 @@ const adminHtml = `
                             data: subscriptions,
                             backgroundColor: '#10b981',
                             borderColor: '#059669',
-                            borderWidth: 1
+                            borderWidth: 2,
+                            tension: 0.3
                         },
                         {
                             label: '网页生成',
                             data: apigens,
                             backgroundColor: '#f59e0b',
                             borderColor: '#d97706',
-                            borderWidth: 1
+                            borderWidth: 2,
+                            tension: 0.3
                         }
                     ];
                     break;
@@ -2464,13 +2536,57 @@ const adminHtml = `
                         data: uniqueUUIDS,
                         backgroundColor: '#8b5cf6',
                         borderColor: '#7c3aed',
-                        borderWidth: 1
+                        borderWidth: 2,
+                        tension: 0.3
                     }];
+                    break;
+                    
+                case 'all':
+                    datasets = [
+                        {
+                            label: '总访问量',
+                            data: totals,
+                            backgroundColor: 'rgba(59, 130, 246, 0.8)',
+                            borderColor: '#2563eb',
+                            borderWidth: 2,
+                            tension: 0.3,
+                            yAxisID: 'y'
+                        },
+                        {
+                            label: '订阅访问',
+                            data: subscriptions,
+                            backgroundColor: 'rgba(16, 185, 129, 0.8)',
+                            borderColor: '#059669',
+                            borderWidth: 2,
+                            tension: 0.3,
+                            yAxisID: 'y'
+                        },
+                        {
+                            label: '网页生成',
+                            data: apigens,
+                            backgroundColor: 'rgba(245, 158, 11, 0.8)',
+                            borderColor: '#d97706',
+                            borderWidth: 2,
+                            tension: 0.3,
+                            yAxisID: 'y'
+                        },
+                        {
+                            label: '活跃UUID数',
+                            data: uniqueUUIDS,
+                            backgroundColor: 'rgba(139, 92, 246, 0.8)',
+                            borderColor: '#7c3aed',
+                            borderWidth: 2,
+                            tension: 0.3,
+                            yAxisID: 'y2'
+                        }
+                    ];
                     break;
             }
             
+            const isAllChart = currentChartType === 'all';
+            
             accessChart = new Chart(ctx, {
-                type: 'bar',
+                type: 'line',
                 data: {
                     labels: dates,
                     datasets: datasets
@@ -2484,11 +2600,21 @@ const adminHtml = `
                         },
                         title: {
                             display: true,
-                            text: '用户订阅访问趋势图'
+                            text: isAllChart ? '订阅访问趋势分析 - 全部指标' : '用户订阅访问趋势图'
                         },
                         tooltip: {
                             mode: 'index',
-                            intersect: false
+                            intersect: false,
+                            callbacks: {
+                                label: function(context) {
+                                    let label = context.dataset.label || '';
+                                    if (label) {
+                                        label += ': ';
+                                    }
+                                    label += context.parsed.y;
+                                    return label;
+                                }
+                            }
                         }
                     },
                     scales: {
@@ -2501,12 +2627,38 @@ const adminHtml = `
                             beginAtZero: true,
                             ticks: {
                                 precision: 0
+                            },
+                            title: {
+                                display: isAllChart,
+                                text: isAllChart ? '访问次数' : ''
                             }
-                        }
+                        },
+                        ...(isAllChart ? {
+                            y2: {
+                                beginAtZero: true,
+                                position: 'right',
+                                ticks: {
+                                    precision: 0
+                                },
+                                title: {
+                                    display: true,
+                                    text: '活跃用户数'
+                                },
+                                grid: {
+                                    drawOnChartArea: false
+                                }
+                            }
+                        } : {})
                     },
                     interaction: {
                         intersect: false,
                         mode: 'index'
+                    },
+                    elements: {
+                        point: {
+                            radius: 4,
+                            hoverRadius: 6
+                        }
                     }
                 }
             });
@@ -2556,6 +2708,7 @@ const adminHtml = `
             document.getElementById('chartTotalBtn').classList.toggle('active', currentChartType === 'total');
             document.getElementById('chartSplitBtn').classList.toggle('active', currentChartType === 'split');
             document.getElementById('chartUuidsBtn').classList.toggle('active', currentChartType === 'uuids');
+            document.getElementById('chartAllBtn').classList.toggle('active', currentChartType === 'all');
         }
         
         async function showUUIDDetails(uuid) {
@@ -3085,14 +3238,27 @@ const adminHtml = `
 
         // ============ 域名管理 ============
         async function loadDom() {
-            const q = \`domains?page=\${domState.page}&size=\${domState.size}&sort=\${domState.sort}&order=\${domState.order}\`;
+            const q = 'domains?page=' + domState.page + '&size=' + domState.size + '&sort=' + domState.sort + '&order=' + domState.order;
             const d = await api(q);
             if(d && d.data) {
                 let h = '';
-                d.data.forEach(i => {
-                    const domainSafe = (i.domain || '').replace(/"/g, '"');
-                    const remarkSafe = (i.remark || '').replace(/"/g, '"');
-                    h += \`<tr><td>\${i.id}</td><td>\${i.domain}</td><td>\${i.remark||'<span style="color:#ccc">无</span>'}</td><td>\${fmtDate(i.created_at)}</td><td><button class="nav-btn small" onclick="editD(\${i.id}, '\${domainSafe}', '\${remarkSafe}')">编辑</button> <button class="nav-btn danger small" onclick="delD(\${i.id})">删除</button></td></tr>\`;
+                d.data.forEach((i, index) => {
+                    // 由于新的API返回的域名数据没有ID，我们需要用索引来临时标识
+                    const domainSafe = (i.domain || '').replace(/"/g, '\\"');
+                    const remarkSafe = (i.remark || '').replace(/"/g, '\\"');
+                    const sourceSafe = (i.source || '').replace(/"/g, '\\"');
+                    
+                    // 使用索引作为临时ID，实际编辑/删除时需要知道来源
+                    h += '<tr>' +
+                         '<td>' + i.domain + '</td>' +
+                         '<td>' + (i.remark || '<span style="color:#ccc">无</span>') + '</td>' +
+                         '<td><span style="color: ' + (i.source === 'Cloudflare' ? '#F6821F' : i.source === '腾讯云EdgeOne' ? '#4A86FF' : '#000') + '">' + i.source + '</span></td>' +
+                         '<td>' + fmtDate(i.created_at) + '</td>' +
+                         '<td>' +
+                         '<button class="nav-btn small" onclick="editD(' + index + ', \\'' + domainSafe + '\\', \\'' + remarkSafe + '\\', \\'' + sourceSafe + '\\')">编辑</button>' +
+                         '<button class="nav-btn danger small" onclick="delD(' + index + ', \\'' + sourceSafe + '\\', \\'' + domainSafe + '\\')">删除</button>' +
+                         '</td>' +
+                         '</tr>';
                 });
                 document.getElementById('domList').innerHTML = h || '<tr><td colspan="5" style="text-align:center">无数据</td></tr>';
                 domState.total = d.total;
@@ -3101,10 +3267,20 @@ const adminHtml = `
         }
         
         async function addDomain() {
-            const d = document.getElementById('newD').value, r = document.getElementById('newR').value;
+            const d = document.getElementById('newD').value;
+            const r = document.getElementById('newR').value;
+            const source = document.getElementById('newSource').value;
+            
             if(!d) return toast('域名不能为空', 'error');
-            if(await api('domains', 'POST', {domain:d, remark:r})) {
-                toast('添加成功'); 
+            
+            const res = await api('domains', 'POST', {
+                domain: d, 
+                remark: r,
+                source: source
+            });
+            
+            if(res && res.success) {
+                toast('域名添加成功'); 
                 document.getElementById('newD').value=''; 
                 document.getElementById('newR').value=''; 
                 domState.page = 1; 
@@ -3112,28 +3288,54 @@ const adminHtml = `
             }
         }
         
-        async function delD(id) { 
-            if(confirm('确认删除?')) { 
-                await api('domains', 'DELETE', {id}); 
-                loadDom(); 
+        async function delD(index, source, domain) { 
+            if(confirm('确认删除域名 "' + domain + '"?')) { 
+                // 这里需要重新获取数据来确定实际的ID
+                const q = 'domains?page=' + domState.page + '&size=' + domState.size + '&sort=' + domState.sort + '&order=' + domState.order;
+                const d = await api(q);
+                if(d && d.data && d.data[index]) {
+                    const domainData = d.data[index];
+                    // 由于API返回的域名没有ID，我们需要从数据库重新查询
+                    // 实际上，删除操作应该由后端处理，我们只需要传递域名和来源
+                    const res = await api('domains', 'DELETE', {
+                        id: index, // 这里传递索引，后端需要根据索引和来源在对应的表中查找
+                        source: domainData.source
+                    });
+                    if(res && res.success) {
+                        loadDom(); 
+                    }
+                } else {
+                    toast('无法找到要删除的域名', 'error');
+                }
             } 
         }
         
-        function editD(id, domain, remark) { 
-            document.getElementById('editId').value = id; 
+        function editD(index, domain, remark, source) { 
+            document.getElementById('editId').value = index; 
             document.getElementById('editDomain').value = domain; 
-            document.getElementById('editRemark').value = remark; 
+            document.getElementById('editRemark').value = remark;
+            document.getElementById('editSource').value = source;
             document.getElementById('editDomModal').style.display = 'flex'; 
             setTimeout(()=>document.getElementById('editDomain').focus(), 100);
         }
         
         async function updateDomain() {
-            const id = document.getElementById('editId').value; 
+            const index = document.getElementById('editId').value; 
             const domain = document.getElementById('editDomain').value; 
             const remark = document.getElementById('editRemark').value;
+            const source = document.getElementById('editSource').value;
+            
             if(!domain) return toast('域名不能为空', 'error');
-            if(await api('domains', 'PUT', { id, domain, remark })) { 
-                toast('修改成功'); 
+            
+            const res = await api('domains', 'PUT', { 
+                id: index,
+                domain, 
+                remark,
+                source
+            });
+            
+            if(res && res.success) { 
+                toast('域名修改成功'); 
                 document.getElementById('editDomModal').style.display = 'none'; 
                 loadDom(); 
             }

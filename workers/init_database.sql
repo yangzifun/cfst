@@ -62,7 +62,7 @@ CREATE INDEX IF NOT EXISTS idx_cfips_carrier ON cfips(carrier);
 CREATE INDEX IF NOT EXISTS idx_cfips_source ON cfips(source);
 
 -- ========================================================
--- 4. 优选域名表
+-- 4. Cloudflare优选域名表
 -- ========================================================
 CREATE TABLE IF NOT EXISTS cf_domains (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,8 +72,22 @@ CREATE TABLE IF NOT EXISTS cf_domains (
     updated_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000)
 );
 
--- 优选域名表索引
+-- Cloudflare优选域名表索引
 CREATE INDEX IF NOT EXISTS idx_cf_domains_domain ON cf_domains(domain);
+
+-- ========================================================
+-- 5. 腾讯云EdgeOne优选域名表
+-- ========================================================
+CREATE TABLE IF NOT EXISTS edgeone_domains (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    domain TEXT UNIQUE NOT NULL,          -- 优选域名
+    remark TEXT,                          -- 备注说明
+    created_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000),
+    updated_at INTEGER DEFAULT (CAST(STRFTIME('%s', 'now') AS INT) * 1000)
+);
+
+-- 腾讯云EdgeOne优选域名表索引
+CREATE INDEX IF NOT EXISTS idx_edgeone_domains_domain ON edgeone_domains(domain);
 
 -- ========================================================
 -- 5. 自动更新设置表

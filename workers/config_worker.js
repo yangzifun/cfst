@@ -365,16 +365,16 @@ th { font-weight: bold; color: #3d474d; background-color: #f0f2f5; }
     font-weight: 500; 
     line-height: 1.4;
 }
-.hosting-cloudflare { background: #e6f2ff; color: #0066cc; border: 1px solid #0066cc; }
-.hosting-aliyun { background: #ffe6e6; color: #ff3300; border: 1px solid #ff3300; }
-.hosting-tencent { background: #e6ffe6; color: #00aa00; border: 1px solid #00aa00; }
-.hosting-aws { background: #fff2e6; color: #ff9900; border: 1px solid #ff9900; }
-.hosting-gcore { background: #f0e6ff; color: #6622cc; border: 1px solid #6622cc; }
-.hosting-fastly { background: #e6fffc; color: #008877; border: 1px solid #008877; }
-.hosting-cachefly { background: #fff9e6; color: #cc8800; border: 1px solid #cc8800; }
-.hosting-lightcdn { background: #e6f7ff; color: #0088cc; border: 1px solid #0088cc; }
+.hosting-cloudflare { background: #F6821F; color: #fff; border: 1px solid #F6821F; }
+.hosting-aliyun { background: #FE6A00; color: #fff; border: 1px solid #FE6A00; }
+.hosting-tencent { background: #4A86FF; color: #fff; border: 1px solid #4A86FF; }
+.hosting-aws { background: #232B37; color: #fff; border: 1px solid #232B37; }
+.hosting-gcore { background: #FF4C00; color: #fff; border: 1px solid #FF4C00; }
+.hosting-fastly { background: #F7272C; color: #fff; border: 1px solid #F7272C; }
+.hosting-cachefly { background: #391376; color: #fff; border: 1px solid #391376; }
+.hosting-lightcdn { background: #F78B2C; color: #fff; border: 1px solid #F78B2C; }
 .hosting-vercel { background: #000; color: #fff; border: 1px solid #000; }
-.hosting-netlify { background: #00c7b7; color: #fff; border: 1px solid #00c7b7; }
+.hosting-netlify { background: #05B7B5; color: #fff; border: 1px solid #05B7B5; }
 .hosting-none { background: #f8f9fa; color: #6c757d; border: 1px solid #6c757d; }
 .hosting-other { background: #f0f0f0; color: #666; border: 1px solid #666; }
 
