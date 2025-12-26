@@ -3252,7 +3252,7 @@ const adminHtml = `
                     h += '<tr>' +
                          '<td>' + i.domain + '</td>' +
                          '<td>' + (i.remark || '<span style="color:#ccc">无</span>') + '</td>' +
-                         '<td><span style="color: ' + (i.source === 'Cloudflare' ? '#F6821F' : i.source === '腾讯云EdgeOne' ? '#4A86FF' : '#000') + '">' + i.source + '</span></td>' +
+                         '<td><span class="hosting-badge ' + (i.source === 'Cloudflare' ? 'hosting-cloudflare' : i.source === '腾讯云EdgeOne' ? 'hosting-tencent' : '') + '">' + i.source + '</span></td>' +
                          '<td>' + fmtDate(i.created_at) + '</td>' +
                          '<td>' +
                          '<button class="nav-btn small" onclick="editD(' + index + ', \\'' + domainSafe + '\\', \\'' + remarkSafe + '\\', \\'' + sourceSafe + '\\')">编辑</button>' +

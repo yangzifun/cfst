@@ -416,22 +416,45 @@ th { font-weight: bold; color: #3d474d; background-color: #f0f2f5; }
 .timestamp { color: #6b7280; font-family: monospace; }
 .log-type { font-weight: 500; }
 
-/* Hosting Select Styles */
+/* Enhanced Select Styles */
 .hosting-select { 
-    padding: 8px 12px; 
+    padding: 10px 12px; 
     border: 2px solid #89949B; 
     border-radius: 4px; 
     background-color: #fff;
     font-size: 0.9rem;
     color: #5a666d;
+    font-family: 'SF Mono', 'Courier New', monospace;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M2.5 4.5L6 8L9.5 4.5' stroke='%235a666d' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    background-size: 12px;
+    padding-right: 32px;
+}
+.hosting-select:hover { 
+    border-color: #5a666d; 
+    background-color: #f8f9fa;
 }
 .hosting-select:focus { 
     outline: none; 
     border-color: #3d474d; 
+    box-shadow: 0 0 0 3px rgba(93, 105, 109, 0.1);
+}
+.hosting-select:disabled { 
+    opacity: 0.6; 
+    cursor: not-allowed;
+    background-color: #f0f2f5;
 }
 .hosting-option { 
-    padding: 8px; 
-    font-size: 0.9rem; 
+    padding: 10px 12px; 
+    font-size: 0.9rem;
+    font-family: 'SF Mono', 'Courier New', monospace;
+}
+.hosting-option:hover {
+    background-color: #f0f2f5;
 }
 `;
 
@@ -536,11 +559,11 @@ const managePageHtmlContent = `
       <div id="statsCard" class="card hidden">
         <h2>3. 访问统计</h2>
         <div class="chart-controls">
-          <select id="statsDays" onchange="loadUuidStats()">
-            <option value="7">最近7天</option>
-            <option value="14">最近14天</option>
-            <option value="30" selected>最近30天</option>
-            <option value="60">最近60天</option>
+          <select id="statsDays" class="hosting-select" onchange="loadUuidStats()">
+            <option value="7" class="hosting-option">最近7天</option>
+            <option value="14" class="hosting-option">最近14天</option>
+            <option value="30" selected class="hosting-option">最近30天</option>
+            <option value="60" class="hosting-option">最近60天</option>
           </select>
           <button class="nav-btn active" onclick="loadUuidStats()">刷新</button>
           <button class="nav-btn" onclick="switchChartType('total')" id="chartTotalBtn">总访问</button>
