@@ -1,28 +1,26 @@
 # 代理配置管理优选工具 
 
-![JavaScript](https://img.shields.io/badge/JavaScript-ES6+-yellow?logo=javascript&logoColor=white) ![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)![D1 Database](https://img.shields.io/badge/Cloudflare-D1-0052CC?logo=cloudflare&logoColor=white)  ![MIT License](https://img.shields.io/badge/License-MIT-green.svg) ![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=node.js&logoColor=white)  ![Chart.js](https://img.shields.io/badge/Chart.js-4.0+-FF6384?logo=chart.js&logoColor=white) ![Version](https://img.shields.io/badge/Version−2.2.0-blue.svg)
+![JavaScript](https://img.shields.io/badge/JavaScript-ES6+-yellow?logo=javascript&logoColor=white) ![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)![D1 Database](https://img.shields.io/badge/Cloudflare-D1-0052CC?logo=cloudflare&logoColor=white)  ![MIT License](https://img.shields.io/badge/License-MIT-green.svg) ![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=node.js&logoColor=white)  ![Chart.js](https://img.shields.io/badge/Chart.js-4.0+-FF6384?logo=chart.js&logoColor=white) ![Version](https://img.shields.io/badge/Version−3.0-blue.svg)
 
-这是一个运行在 Cloudflare Worker 上的多功能代理工具，结合 Cloudflare D1 数据库，提供**IP优选**和**域名优选**的批量替换功能。系统采用四 Worker 架构，分别处理优选生成、配置管理、系统管理和IP更新，实现功能解耦和独立部署。
+这是一个运行在 Cloudflare Worker 上的多功能代理工具，结合 Cloudflare D1 数据库，提供**IP优选**和**域名优选**的批量替换功能。系统采用三 Worker 架构，分别处理优选生成、配置管理和系统管理，实现功能解耦和独立部署。
 
 ## 📦 系统组成
 
-**系统由4个核心Worker组成**：
+**系统由3个核心Worker组成**：
 
 - **`worker.js`** - 优选生成器：处理 IP/域名优选、订阅生成、批量配置替换、访问日志记录
 - **`config_worker.js`** - 配置管理器：提供配置 CRUD 操作、订阅接口、配置编辑功能、UUID访问统计
-- **`mg_worker.js`** - 管理后台：JWT 认证、域名/IP/UUID 管理、系统统计、手动 IP 更新代理、订阅访问统计分析
-- **`ip-worker.js`** - IP管理服务：专门处理IP更新任务，支持定时更新和手动更新接口
+- **`mg_worker.js`** - 管理后台：JWT 认证、域名/IP/UUID 管理、系统统计、手动 IP 更新、订阅访问统计分析（已集成IP更新功能）
 
 ## ✨ 主要特性
 
-### 1. **四 Worker 微服务架构**
+### 1. **三 Worker 微服务架构**
 
-该系统采用四 Worker 架构，各司其职：
+该系统采用三 Worker 架构，各司其职：
 
 *   **`worker.js`** - 优选生成器：处理 IP/域名优选、订阅生成、批量配置替换、访问日志记录
 *   **`config_worker.js`** - 配置管理器：提供配置 CRUD 操作、订阅接口、配置编辑功能，包含外部配置生成器链接和UUID访问统计
-*   **`mg_worker.js`** - 管理后台：JWT 认证、域名/IP/UUID 管理、系统统计、手动 IP 更新代理、订阅访问统计分析
-*   **`ip-worker.js`** - IP管理服务：专门处理IP更新任务，支持定时更新和手动更新接口，与mg_worker.js共享数据库
+*   **`mg_worker.js`** - 管理后台：JWT 认证、域名/IP/UUID 管理、系统统计、IP更新功能、订阅访问统计分析（已合并IP更新功能）
 
 ### 2. **域名托管属性管理 [v2.2.0更新]**
 
@@ -46,7 +44,7 @@
 *   支持将配置中的地址批量替换为 **优选 IP** 或 **优选域名**
 *   **支持 IPv4/IPv6** 和不同运营商（电信/联通/移动）筛选
 *   **IP 资源池增加了 IP 来源显示**（如：HostMonit IPv4, HostMonit IPv6, Vps789）
-*   支持通过管理后台手动更新 IP 数据源（代理到ip-worker.js服务）
+*   支持通过管理后台手动更新 IP 数据源（直接调用mg_worker.js内置的IP更新功能）
 
 ### 5. **配置管理 (CRUD) [v1.2]**
 
@@ -91,7 +89,7 @@
 *   **IP 资源池管理**：查看、删除、刷新优选 IP，**支持 HostMonit IPv6 接口开启/关闭，并显示 IP 来源**
 *   UUID 分组管理：按 UUID 管理配置分组
 *   系统统计：实时查看域名、IP、UUID 数量统计
-*   **IP更新职责分离**：IP更新任务由专门的ip-worker.js处理，管理后台仅作为代理
+*   **IP更新功能集成**：IP更新任务已集成到mg_worker.js中，无需独立的IP Worker
 
 ### 10. **IP资源池智能管理 [v2.1新增]**
 
@@ -128,7 +126,7 @@
 
 1.  一个 **Cloudflare** 账号。
 2.  启用 **Workers** 和 **D1 Database** 功能。
-3.  至少一个自定义域名（用于部署四个Worker）。
+3.  至少一个自定义域名（用于部署三个Worker）。
 
 ## 🚀 部署步骤
 
@@ -145,38 +143,33 @@
 | **configs** | 存储代理配置数据，包括域名托管属性 | `worker.js`, `config_worker.js`, `mg_worker.js` | **必需** | **已使用** |
 | **config_access_logs** | 记录配置访问日志，用于统计分析 | `worker.js`, `config_worker.js`, `mg_worker.js` | **必需** | **已使用** |
 | **admin_users** | 存储管理员账户信息，支持 MFA 双重验证 | `mg_worker.js` | **必需** | **已使用** |
-| **cfips** | 存储优选 IP 地址，支持一个 IP 多个运营商 | `worker.js`, `mg_worker.js`, `ip_worker.js` | **必需** | **已使用** |
+| **cfips** | 存储优选 IP 地址，支持一个 IP 多个运营商 | `worker.js`, `mg_worker.js` | **必需** | **已使用** |
 | **cf_domains** | 存储优选域名列表 | `worker.js`, `mg_worker.js` | **必需** | **已使用** |
-| **auto_update_settings** | 存储自动更新配置设置 | `mg_worker.js`, `ip_worker.js` | **必需** | **已使用** |
+| **auto_update_settings** | 存储自动更新配置设置 | `mg_worker.js` | **必需** | **已使用** |
 | **mfa_backup_codes** | 存储 MFA 备份码 | `mg_worker.js` | **必需** | **已使用** |
-| **system_logs** | 系统操作日志表 | **无** | **可选** | **未使用** |
-| **api_access_stats** | API 访问统计表 | **无** | **可选** | **未使用** |
-| **users** | 用户表（外键引用） | **无** | **可选** | **未使用** |
 
 **说明：**
 - **必需表单**：系统正常运行必须的表单，所有 Worker 程序都会用到
 - **已使用表单**：在当前代码中有实际读写操作的表单
-- **未使用表单**：在 `init_database.sql` 中创建了，但当前代码中没有使用的表单，可选择性创建
+- **已移除表单**：`users`, `uuids`, `system_logs`, `api_access_stats` 等未使用的表已从数据库文件中移除
 - **程序依赖关系**：
   - `worker.js`：读取 `configs`, `cfips`, `cf_domains`，写入 `config_access_logs`
   - `config_worker.js`：读写 `configs`，读取 `config_access_logs`
   - `mg_worker.js`：读写 `admin_users`, `cf_domains`, `cfips`, `auto_update_settings`, `mfa_backup_codes`，读取 `configs`, `config_access_logs`
-  - `ip_worker.js`：读写 `cfips`, `auto_update_settings`
 
 要初始化数据库，请复制 `init_database.sql` 中的完整 SQL 语句到 D1 Console 中执行：
 
 
 
-### 3. 创建四个Worker并绑定D1
+### 3. 创建三个Worker并绑定D1
 
-创建四个Worker并绑定到同一个D1数据库：
+创建三个Worker并绑定到同一个D1数据库：
 
 | Worker名称     | 绑定文件           | 数据库绑定变量 | 建议路由/域名                   |
 | -------------- | ------------------ | -------------- | ------------------------------- |
 | `proxy-main`   | `worker.js`        | `DB`           | `cfst.yangzifun.org*`       |
 | `proxy-config` | `config_worker.js` | `DB`           | `config.proxypilot.yangzifun.org` |
 | `proxy-mg`     | `mg_worker.js`     | `DB`           | `mg.proxypilot.yangzifun.org`         |
-| `proxy-ip`     | `ip-worker.js`     | `DB`           | `ip.proxypilot.yangzifun.org`     |
 
 绑定步骤：
 
@@ -184,8 +177,7 @@
 2.  **Variable name** 必须设置为 `DB`（区分大小写）
 3.  选择前面创建的D1数据库
 4.  **路由配置**：
-    *   在 DNS 设置中创建四条路由（示例，请替换为您的实际域名）
-    *   **注意**：`ip-worker.js` 需要分配一个独立的域名，如 `ip-cfst.api.yangzifun.org`
+    *   在 DNS 设置中创建三条路由（示例，请替换为您的实际域名）
 5.  **重要配置**：进入每个 Worker 的 **Settings** -> **Variables**：
     *   **D1 Database Bindings**：
         *   **Variable name**: `DB` (必须完全一致，注意大写)
@@ -193,9 +185,6 @@
     *   **JWT 密钥**（仅限 `mg_worker.js`）：
         *   **Variable name**: `JWT_SECRET` (必须完全一致)
         *   **Value**: 请设置一个足够长且复杂的随机字符串作为 JWT 密钥，用于签名和验证管理后台的认证 Token。例如，可以使用 `openssl rand -base64 32` 生成。
-    *   **IP Worker 域名**（仅限 `mg_worker.js`）：
-        *   **Variable name**: `IP_WORKER_DOMAIN` (可选，可在代码中直接设置)
-        *   **Value**: 设置为 `ip-worker.js` 的域名，如 `https://ip-cfst.api.yangzifun.org`
 
 ### 4. 初始化域名表 (可选)
 
@@ -265,7 +254,7 @@ INSERT INTO cf_domains (domain, remark, created_at) VALUES
 *   在此页面，您可以：
     *   **系统概览**：查看系统状态和访问摘要
     *   **域名管理**：添加/编辑/删除优选域名
-    *   **IP 资源池管理**：**管理 IP 池，包括新的 HostMonit IPv6 开启按钮，并显示 IP 来源**，以及自动更新设置。点击"立即更新"会通过代理调用ip-worker.js服务
+    *   **IP 资源池管理**：**管理 IP 池，包括新的 HostMonit IPv6 开启按钮，并显示 IP 来源**，以及自动更新设置。点击"立即更新"会直接调用mg_worker.js内置的IP更新功能
     *   **配置分组管理**：查看和管理 UUID 分组
     *   **订阅分析**：全局访问统计分析
     *   **安全中心**：管理 MFA 双重验证
@@ -292,7 +281,6 @@ sequenceDiagram
     participant Config as config_worker.js
     participant DB as D1 数据库
     participant Mg as mg_worker.js
-    participant IP as ip-worker.js
 
     User->>Config: 访问 /manage (配置管理)
     Config->>DB: 读写配置数据
@@ -319,13 +307,11 @@ sequenceDiagram
 
     User->>Mg: 点击"立即更新IP"
     Mg->>DB: 保存自动更新设置
-    Mg->>IP: 代理调用 /api/ips/update
-    IP->>DB: 读取设置并执行IP更新
-    IP-->>Mg: 返回更新结果
+    Mg->>Mg: 直接执行IP更新任务
     Mg-->>User: 显示更新成功/失败
 
-    IP->>IP: 定时任务更新IP
-    IP->>DB: 读取设置并执行IP更新
+    Mg->>Mg: 定时任务更新IP
+    Mg->>DB: 读取设置并执行IP更新
 ```
 
 ### 域名托管属性处理逻辑
@@ -351,10 +337,8 @@ graph TD
 | `worker.js`    | `mg_worker.js`     | `/api/domains`                      | 获取优选域名                   |
 | `worker.js`    | `config_worker.js` | `/api/access_log`                   | 记录访问日志                   |
 | 用户浏览器     | `mg_worker.js`     | `/api/login` (及其他`/api`前缀接口) | 管理后台操作                   |
-| 用户浏览器     | `mg_worker.js`     | `/api/ips/refresh`                  | 手动更新IP（代理）             |
 | 用户浏览器     | `mg_worker.js`     | `/api/stats`                        | 全局订阅统计分析               |
 | 用户浏览器     | `config_worker.js` | `/api/stats/uuid/:uuid`             | 查询特定UUID访问统计           |
-| `mg_worker.js` | `ip-worker.js`     | `/api/ips/update`                   | 执行IP更新任务                 |
 
 ## 📡 API 接口文档
 
@@ -369,7 +353,7 @@ graph TD
 | `PUT`    | `/api/domains`              | 更新域名                   | `{"id":1, "domain":"updated.com", "remark":"更新"}`          |
 | `DELETE` | `/api/domains`              | 删除域名                   | `{"id":1}`                                                   |
 | `GET`    | `/api/ips`                  | 获取IP列表                 | `?page=1&size=20&sort=ip&order=desc`                         |
-| `POST`   | `/api/ips/refresh`          | **代理调用IP更新**         | `{"global_enabled":true, "hostmonit_v4":true, "hostmonit_v6":false, "vps789":true}` |
+| `POST`   | `/api/ips/update`           | **直接执行IP更新**         | `{"global_enabled":true, "hostmonit_v4":true, "hostmonit_v6":false, "vps789":true}` |
 | `DELETE` | `/api/ips`                  | 删除IP                     | `{"ip":"1.1.1.1"}`                                           |
 | `GET`    | `/api/uuids`                | 获取UUID列表               | `?page=1&size=10&sort=updated_at&order=desc`                 |
 | `DELETE` | `/api/uuids`                | 删除UUID分组及其所有配置   | `{"uuid":"some_uuid"}`                                       |
@@ -377,15 +361,6 @@ graph TD
 | `POST`   | `/api/settings/auto-update` | 更新自动更新设置           | `{"global_enabled": true, "hostmonit_v4": true, "hostmonit_v6": false, "vps789": true}` |
 | `GET`    | `/api/stats`                | 获取系统概览及全局访问统计 | `?days=30` (默认30天)                                        |
 | `GET`    | `/api/stats/uuid-details`   | 获取指定UUID的详细访问记录 | `?uuid={uuid}&start_date=xxx&end_date=xxx`                   |
-
-### ip-worker.js 接口：
-
-| 方法   | 路径                | 描述                           | 参数示例                                                     |
-| :----- | :------------------ | :----------------------------- | :----------------------------------------------------------- |
-| `GET`  | `/`                 | 服务状态页面                   | -                                                            |
-| `GET`  | `/api/ips/list`     | 获取IP列表（公开接口）         | `?page=1&size=20&sort=created_at&order=desc`                 |
-| `GET`  | `/api/ips/update`   | **手动触发IP更新（无需认证）** | -                                                            |
-| `POST` | `/api/ips/settings` | 设置自动更新配置（需认证）     | `{"global_enabled": true, "hostmonit_v4": true, "hostmonit_v6": false, "vps789": true}` |
 
 ### worker.js 接口：
 
@@ -551,7 +526,27 @@ graph TD
 
 ## 📊 版本更新历史
 
-### v2.2.0 (最新)
+### v3.0 (最新)
+
+-   **合并IP更新功能**：将原ip-worker.js的功能完整合并到mg_worker.js中，简化部署架构
+    -   移除独立的ip-worker.js文件，减少Worker数量
+    -   mg_worker.js现在直接处理IP更新任务，无需代理调用
+    -   更新readme.md文档，反映新的三Worker架构
+-   **接口优化**：mg_worker.js的`/api/ips/update`接口现在是直接执行IP更新，不再代理调用外部Worker
+
+### v2.3.0
+
+-   **数据库清理优化**：移除未使用的数据库表，简化数据库结构
+    -   移除 `users`, `uuids`, `system_logs`, `api_access_stats` 等未使用的表
+    -   只保留实际使用的表：`configs`, `config_access_logs`, `cfips`, `cf_domains`, `auto_update_settings`, `admin_users`, `mfa_backup_codes`
+    -   移除重复的 `config_access_logs` 表定义
+    -   简化初始化脚本，提高部署效率
+-   **数据库结构优化**：减少冗余字段，优化索引配置
+    -   `cfips` 表移除 `latency` 字段（未使用）
+    -   `auto_update_settings` 表移除 `update_interval` 字段（未使用）
+-   **代码清理**：根据代码分析结果，确保数据库与代码使用完全一致
+
+### v2.2.0
 
 -   **域名托管属性扩展**：支持多种CDN厂商，增加Gcore、Fastly、CacheFly、LightCDN、Vercel、Netlify等域名托管选项
 -   **智能优选过滤**：优选配置生成器根据域名托管属性智能处理配置
@@ -615,7 +610,6 @@ graph TD
 -   支持IP/域名优选替换
 -   提供订阅接口
 -   基础管理功能
-
 ## 🎯 适用场景
 
 1.  **代理配置批量管理**：适合管理多个代理配置，避免重复修改

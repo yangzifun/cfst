@@ -28,7 +28,7 @@ function b64_to_utf8(str) {
 function jsonResponse(data, status = 200) {
     return new Response(JSON.stringify(data, null, 2), {
         status: status,
-        headers: { 
+        headers: {
             'Content-Type': 'application/json;charset=UTF-8',
             'Access-Control-Allow-Origin': '*'
         },
@@ -54,10 +54,10 @@ function extractRemarkFromConfig(configStr, protocol) {
         if (protocol === 'vmess') {
             const vmessObj = JSON.parse(b64_to_utf8(configStr.substring(8)));
             return vmessObj.ps || vmessObj.remark || null;
-        } else if (protocol === 'vless' || protocol === 'trojan' || 
-                  protocol === 'hysteria2' || protocol === 'tuic' ||
-                  protocol === 'anytls' || protocol === 'socks5' ||
-                  protocol === 'any-reality' || protocol === 'ss') {
+        } else if (protocol === 'vless' || protocol === 'trojan' ||
+            protocol === 'hysteria2' || protocol === 'tuic' ||
+            protocol === 'anytls' || protocol === 'socks5' ||
+            protocol === 'any-reality' || protocol === 'ss') {
             const url = new URL(configStr);
             if (url.hash) return decodeURIComponent(url.hash.substring(1));
         }
@@ -84,70 +84,70 @@ async function fetchConfigsByUuidFromDB(uuid, env) {
 async function fetchUuidAccessStatsFromDB(uuid, env, days = 30) {
     const db = env.DB;
     if (!db) return { success: false, error: "数据库未连接" };
-    
+
     try {
         // 检查是否存在访问日志表
         const tableCheck = await db.prepare(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='config_access_logs'"
         ).first();
-        
+
         if (!tableCheck) {
-            return { 
-                success: false, 
-                error: "访问日志表不存在，请确保已升级到v2.0+版本" 
+            return {
+                success: false,
+                error: "访问日志表不存在，请确保已升级到v2.0+版本"
             };
         }
-        
+
         // 获取总访问统计
         const totalStats = await db.prepare(`
-            SELECT 
+            SELECT
                 COUNT(*) as total_access,
                 SUM(CASE WHEN query_type = 'subscription' THEN 1 ELSE 0 END) as subscription_count,
                 SUM(CASE WHEN query_type = 'api-generation' THEN 1 ELSE 0 END) as apigen_count,
                 MIN(created_at) as first_access,
                 MAX(created_at) as last_access
-            FROM config_access_logs 
+            FROM config_access_logs
             WHERE uuid = ?
         `).bind(uuid).first();
-        
+
         // 获取今日访问统计
         const today = new Date().toISOString().split('T')[0];
         const todayStats = await db.prepare(`
-            SELECT 
+            SELECT
                 COUNT(*) as today_total,
                 SUM(CASE WHEN query_type = 'subscription' THEN 1 ELSE 0 END) as today_subscription,
                 SUM(CASE WHEN query_type = 'api-generation' THEN 1 ELSE 0 END) as today_apigen
-            FROM config_access_logs 
+            FROM config_access_logs
             WHERE uuid = ? AND DATE(created_at) = ?
         `).bind(uuid, today).first();
-        
+
         // 获取按日统计（最近指定天数）
         const startDate = new Date();
         startDate.setDate(startDate.getDate() - days);
         const startDateStr = startDate.toISOString().split('T')[0];
-        
+
         const dailyStats = await db.prepare(`
-            SELECT 
+            SELECT
                 DATE(created_at) as date,
                 COUNT(*) as total,
                 SUM(CASE WHEN query_type = 'subscription' THEN 1 ELSE 0 END) as subscription,
                 SUM(CASE WHEN query_type = 'api-generation' THEN 1 ELSE 0 END) as api_generation
-            FROM config_access_logs 
+            FROM config_access_logs
             WHERE uuid = ? AND DATE(created_at) >= ?
             GROUP BY DATE(created_at)
             ORDER BY date ASC
         `).bind(uuid, startDateStr).all();
-        
+
         // 获取最近50条访问记录
         const recentLogs = await db.prepare(`
-            SELECT 
+            SELECT
                 uuid, query_type, client_ip, user_agent, created_at
-            FROM config_access_logs 
+            FROM config_access_logs
             WHERE uuid = ?
             ORDER BY created_at DESC
-            LIMIT 50
+                LIMIT 50
         `).bind(uuid).all();
-        
+
         return {
             success: true,
             uuid: uuid,
@@ -162,12 +162,12 @@ async function fetchUuidAccessStatsFromDB(uuid, env, days = 30) {
             daily_stats: dailyStats?.results || [],
             recent_logs: recentLogs?.results || []
         };
-        
+
     } catch (e) {
         console.error("获取UUID访问统计失败:", e.message);
-        return { 
-            success: false, 
-            error: "数据库查询失败: " + e.message 
+        return {
+            success: false,
+            error: "数据库查询失败: " + e.message
         };
     }
 }
@@ -177,13 +177,13 @@ async function handleRawSubscription(uuid, env) {
     if (!uuid) return jsonResponse({ error: 'UUID Required' }, 400);
     const configs = await fetchConfigsByUuidFromDB(uuid, env);
     if (!configs || configs.length === 0) return new Response("UUID Not Found or Empty", { status: 404 });
-    
+
     const configList = configs.map(c => c.config_data);
     return new Response(btoa(configList.join('\n')), {
         status: 200,
-        headers: { 
-            'Content-Type': 'text/plain;charset=UTF-8', 
-            'Subscription-User-Info': 'upload=0; download=0; total=10737418240000; expire=2524608000' 
+        headers: {
+            'Content-Type': 'text/plain;charset=UTF-8',
+            'Subscription-User-Info': 'upload=0; download=0; total=10737418240000; expire=2524608000'
         },
     });
 }
@@ -197,15 +197,15 @@ async function handleAddConfig(request, env) {
     try { body = await request.json(); } catch (e) { return jsonResponse({ error: '无效 JSON' }, 400); }
     const { uuid, config_data, domain_hosting = 'Cloudflare' } = body;
     if (!uuid || !config_data) return jsonResponse({ error: '字段缺失' }, 400);
-    
+
     // 验证域名托管参数 - 已扩展列表
     const validDomainHostings = [
-        'Cloudflare', '阿里ESA', '腾讯Edgeone', 'AWS Cloudfront', 
+        'Cloudflare', '阿里ESA', '腾讯Edgeone', 'AWS Cloudfront',
         'Gcore', 'Fastly', 'CacheFly', 'LightCDN', 'Vercel', 'Netlify',
         '无', '其他'
     ];
     const hostingValue = validDomainHostings.includes(domain_hosting) ? domain_hosting : 'Cloudflare';
-    
+
     const lines = config_data.split('\n').map(l => l.trim()).filter(Boolean);
     const stmts = [];
     for (const line of lines) {
@@ -223,19 +223,19 @@ async function handleUpdateConfig(request, env) {
     let body;
     try { body = await request.json(); } catch (e) { return jsonResponse({ error: '无效JSON' }, 400); }
     const { id, config_data, domain_hosting = 'Cloudflare' } = body;
-    
+
     const protocol = getProtocol(config_data);
     if(protocol === 'unknown') return jsonResponse({ error: '不支持的配置格式' }, 400);
     const remark = extractRemarkFromConfig(config_data, protocol);
-    
+
     // 验证域名托管参数 - 已扩展列表
     const validDomainHostings = [
-        'Cloudflare', '阿里ESA', '腾讯Edgeone', 'AWS Cloudfront', 
+        'Cloudflare', '阿里ESA', '腾讯Edgeone', 'AWS Cloudfront',
         'Gcore', 'Fastly', 'CacheFly', 'LightCDN', 'Vercel', 'Netlify',
         '无', '其他'
     ];
     const hostingValue = validDomainHostings.includes(domain_hosting) ? domain_hosting : 'Cloudflare';
-    
+
     try {
         const res = await env.DB.prepare('UPDATE configs SET config_data = ?, protocol = ?, remark = ?, domain_hosting = ?, updated_at = ? WHERE id = ?')
             .bind(config_data, protocol, remark, hostingValue, Date.now(), id).run();
@@ -251,7 +251,7 @@ async function handleGetConfigs(uuid, env) {
 // 新增：获取UUID访问统计API
 async function handleGetUuidStats(uuid, env) {
     if (!uuid) return jsonResponse({ error: 'UUID Required' }, 400);
-    
+
     const stats = await fetchUuidAccessStatsFromDB(uuid, env, 30);
     return jsonResponse(stats);
 }
@@ -281,13 +281,13 @@ export default {
         try {
             if (method === 'GET') {
                 if (path === '/') return new Response(managePageHtmlContent.replace(/YOUR_WORKER_DOMAIN_PATH/g, DOMAIN_NAME), { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
-                
+
                 const subMatch = subUUID.exec(url);
                 if (subMatch) return await handleRawSubscription(subMatch.pathname.groups.uuid, env);
 
                 const uuidMatch = manageUUID.exec(url);
                 if (uuidMatch) return await handleGetConfigs(uuidMatch.pathname.groups.uuid, env);
-                
+
                 // 新增：处理UUID统计请求
                 const statsMatch = uuidStats.exec(url);
                 if (statsMatch) {
@@ -298,9 +298,9 @@ export default {
                 }
             }
 
-    if (method === 'POST' && path === '/manage/configs') return await handleAddConfig(request, env);
-    if (method === 'PUT' && path === '/manage/configs') return await handleUpdateConfig(request, env);
-            
+            if (method === 'POST' && path === '/manage/configs') return await handleAddConfig(request, env);
+            if (method === 'PUT' && path === '/manage/configs') return await handleUpdateConfig(request, env);
+
             if (method === 'DELETE') {
                 const idMatch = manageID.exec(url);
                 if (idMatch) return await handleDelete('id', idMatch.pathname.groups.id, env);
@@ -508,7 +508,7 @@ const managePageHtmlContent = `
       <div class="nav-grid">
          <button class="nav-btn primary" disabled style="opacity:1;cursor:default;">管理面板</button>
          <!-- Added 'primary' class to make the link look exactly like the main button -->
-         <a href="https://cfst.api.yangzifun.org" target="_blank" class="nav-btn primary">配置生成</a>
+         <a href="https://cfst.yangzifun.org" target="_blank" class="nav-btn primary">CF配置生成</a>
       </div>
 
       <div class="card">

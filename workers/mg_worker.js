@@ -1,12 +1,11 @@
 /* =================================================================
- * Cloudflare Worker: YZFN Configuration Management with MFA
+ * Cloudflare Worker: YZFN Configuration Management with MFA (合并IP更新功能)
  * ================================================================= */
 
 // =================================================================
 //  1. 常量定义
 // =================================================================
 const DEFAULT_JWT_SECRET = 'your-default-jwt-secret-change-this';
-const IP_WORKER_DOMAIN = 'https://ip-cfst.api.yangzifun.org'; // IP管理服务的域名，请确保正确
 
 // =================================================================
 //  2. 工具函数
@@ -48,13 +47,13 @@ async function verifyJwt(token, secret = DEFAULT_JWT_SECRET) {
 
 // JSON响应
 function jsonResponse(data, status = 200) {
-    return new Response(JSON.stringify(data), { 
-        status, 
-        headers: { 
+    return new Response(JSON.stringify(data), {
+        status,
+        headers: {
             'Content-Type': 'application/json',
             'Access-Control-Allow-Origin': '*',
             'Cache-Control': 'no-cache, no-store'
-        } 
+        }
     });
 }
 
@@ -63,7 +62,7 @@ async function getAccessStatsSummary(env, days = 30) {
     try {
         const db = env.DB;
         if (!db) throw new Error("D1数据库未绑定。");
-        
+
         // 获取总访问统计
         const totalStats = await db.prepare(
             'SELECT COUNT(*) as total, COUNT(DISTINCT uuid) as unique_uuids, ' +
@@ -71,7 +70,7 @@ async function getAccessStatsSummary(env, days = 30) {
             'SUM(CASE WHEN query_type = "api-generation" THEN 1 ELSE 0 END) as apigen_total ' +
             'FROM config_access_logs'
         ).first();
-        
+
         // 获取今日访问统计
         const today = new Date().toISOString().split('T')[0];
         const todayStats = await db.prepare(
@@ -80,12 +79,12 @@ async function getAccessStatsSummary(env, days = 30) {
             'SUM(CASE WHEN query_type = "api-generation" THEN 1 ELSE 0 END) as today_apigen ' +
             'FROM config_access_logs WHERE DATE(created_at) = ?'
         ).bind(today).first();
-        
+
         // 获取按日统计（近30天）
         const startDate = new Date();
         startDate.setDate(startDate.getDate() - days);
         const startDateStr = startDate.toISOString().split('T')[0];
-        
+
         const dailyStats = await db.prepare(
             'SELECT DATE(created_at) as date, ' +
             'COUNT(*) as total, ' +
@@ -97,7 +96,7 @@ async function getAccessStatsSummary(env, days = 30) {
             'GROUP BY DATE(created_at) ' +
             'ORDER BY date DESC'
         ).bind(startDateStr).all();
-        
+
         // 获取热门UUID排名
         const popularUUIDs = await db.prepare(
             'SELECT uuid, COUNT(*) as access_count, ' +
@@ -108,7 +107,7 @@ async function getAccessStatsSummary(env, days = 30) {
             'ORDER BY access_count DESC ' +
             'LIMIT 10'
         ).all();
-        
+
         return {
             success: true,
             total_requests: totalStats?.total || 0,
@@ -132,24 +131,24 @@ async function getUUIDAccessDetails(env, uuid, startDate, endDate) {
     try {
         const db = env.DB;
         if (!db) throw new Error("D1数据库未绑定。");
-        
+
         let query = 'SELECT uuid, query_type, client_ip, user_agent, created_at FROM config_access_logs WHERE uuid = ?';
         const params = [uuid];
-        
+
         if (startDate) {
             query += ' AND DATE(created_at) >= ?';
             params.push(startDate);
         }
-        
+
         if (endDate) {
             query += ' AND DATE(created_at) <= ?';
             params.push(endDate);
         }
-        
+
         query += ' ORDER BY created_at DESC LIMIT 100';
-        
+
         const { results } = await db.prepare(query).bind(...params).all();
-        
+
         // 获取该UUID的基本信息
         const uuidStats = await db.prepare(
             'SELECT COUNT(*) as total_access, ' +
@@ -157,7 +156,7 @@ async function getUUIDAccessDetails(env, uuid, startDate, endDate) {
             'MAX(created_at) as last_access ' +
             'FROM config_access_logs WHERE uuid = ?'
         ).bind(uuid).first();
-        
+
         return {
             success: true,
             uuid: uuid,
@@ -200,21 +199,21 @@ class TOTP {
         const timeView = new DataView(timeBuffer);
         timeView.setUint32(0, Math.floor(time / 0x100000000));
         timeView.setUint32(4, time % 0x100000000);
-        
-        const keyObj = crypto.subtle.importKey('raw', new Uint8Array(key), 
+
+        const keyObj = crypto.subtle.importKey('raw', new Uint8Array(key),
             { name: 'HMAC', hash: 'SHA-1' }, false, ['sign']);
-        
+
         return keyObj.then(k => {
             return crypto.subtle.sign('HMAC', k, timeBuffer);
         }).then(signature => {
             const sigArray = new Uint8Array(signature);
             const offset = sigArray[sigArray.length - 1] & 0xf;
-            
+
             const binary = ((sigArray[offset] & 0x7f) << 24) |
-                          ((sigArray[offset + 1] & 0xff) << 16) |
-                          ((sigArray[offset + 2] & 0xff) << 8) |
-                          (sigArray[offset + 3] & 0xff);
-            
+                ((sigArray[offset + 1] & 0xff) << 16) |
+                ((sigArray[offset + 2] & 0xff) << 8) |
+                (sigArray[offset + 3] & 0xff);
+
             const otp = binary % 1000000;
             return otp.toString().padStart(6, '0');
         });
@@ -226,22 +225,22 @@ class TOTP {
         const bytes = [];
         let bits = 0;
         let buffer = 0;
-        
+
         for (let i = 0; i < base32.length; i++) {
             const char = base32.charAt(i);
             const value = chars.indexOf(char);
             if (value === -1) continue;
-            
+
             buffer = (buffer << 5) | value;
             bits += 5;
-            
+
             while (bits >= 8) {
                 bits -= 8;
                 bytes.push((buffer >> bits) & 0xff);
                 buffer &= (1 << bits) - 1;
             }
         }
-        
+
         return bytes;
     }
 
@@ -263,12 +262,248 @@ class TOTP {
 }
 
 // =================================================================
-//  4. 移除IP获取和更新功能，只保留数据库初始化壳
+//  4. IP获取和更新功能 (从ip_worker.js合并)
 // =================================================================
 
-// 移除 fetchIpsFromHostMonit, fetchIpsFromVps789, runIpUpdateTask
+async function fetchIpsFromHostMonit(type = 'v4') {
+    try {
+        const requestBody = { key: "iDetkOys" };
+        if (type === 'v6') requestBody.type = 'v6';
 
-// 初始化 D1 数据库基本设置 (为 mg_worker.js 简化，不需要管 IP 相关的默认设置，只需确保表存在)
+        const res = await fetch('https://api.hostmonit.com/get_optimization_ip', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(requestBody)
+        });
+
+        if (!res.ok) return [];
+        const data = await res.json();
+
+        if (data.code === 200 && Array.isArray(data.info)) {
+            return data.info.map(i => {
+                let carrier = i.line || 'ALL';
+                if (carrier === 'CMI') carrier = 'CM';
+                if (carrier === 'CT') carrier = 'CT';
+                if (carrier === 'CU') carrier = 'CU';
+                return {
+                    ip: i.ip,
+                    ip_type: i.ip.includes(':') ? 'v6' : 'v4',
+                    carrier: carrier,
+                    source: `hostmonit_${type}`
+                };
+            });
+        }
+        return [];
+    } catch (e) {
+        console.error(`fetchIpsFromHostMonit error:`, e.message);
+        return [];
+    }
+}
+
+async function fetchIpsFromVps789() {
+    try {
+        const res = await fetch('https://vps789.com/openApi/cfIpApi', {
+            headers: { 'User-Agent': 'CF-Worker/4.0', 'Accept': 'application/json' }
+        });
+
+        if (!res.ok) return [];
+        const data = await res.json();
+        const ips = [];
+
+        if (data.code === 0 && data.data) {
+            for (const k in data.data) {
+                const arr = data.data[k];
+                if (Array.isArray(arr)) {
+                    let carrier = 'ALL';
+                    if (k.includes('移动') || k.includes('CM') || k === 'CM') carrier = 'CM';
+                    else if (k.includes('电信') || k.includes('CT') || k === 'CT') carrier = 'CT';
+                    else if (k.includes('联通') || k.includes('CU') || k === 'CU') carrier = 'CU';
+
+                    arr.forEach(i => {
+                        if (i && i.ip) {
+                            ips.push({
+                                ip: i.ip,
+                                ip_type: i.ip.includes(':') ? 'v6' : 'v4',
+                                carrier: carrier,
+                                source: 'vps789'
+                            });
+                        }
+                    });
+                }
+            }
+        }
+        return ips;
+    } catch (e) {
+        console.error('fetchIpsFromVps789 error:', e.message);
+        return [];
+    }
+}
+
+/**
+ * 关键修复：检查并自动升级数据库表结构
+ */
+async function ensureSchema(env) {
+    try {
+        // 1. 确保表存在
+        await env.DB.prepare(`
+            CREATE TABLE IF NOT EXISTS cfips (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ip TEXT NOT NULL,
+                ip_type TEXT,
+                carrier TEXT,
+                source TEXT,
+                created_at INTEGER,
+                updated_at INTEGER
+            )
+        `).run();
+
+        // 2. 检查旧表是否缺少 updated_at 列 (Migration)
+        const info = await env.DB.prepare('PRAGMA table_info(cfips)').all();
+        const columns = (info.results || []).map(c => c.name);
+
+        if (!columns.includes('updated_at')) {
+            console.log('检测到旧表结构，正在添加 updated_at 列...');
+            await env.DB.prepare('ALTER TABLE cfips ADD COLUMN updated_at INTEGER').run();
+        }
+
+        // 3. 确保设置表存在
+        await env.DB.prepare(`
+            CREATE TABLE IF NOT EXISTS auto_update_settings (
+                source TEXT PRIMARY KEY,
+                enabled INTEGER,
+                updated_at INTEGER
+            )
+        `).run();
+
+    } catch (e) {
+        console.error('Schema check/update failed:', e);
+    }
+}
+
+async function executeInChunks(stmts) {
+    const CHUNK_SIZE = 10;
+    for (let i = 0; i < stmts.length; i += CHUNK_SIZE) {
+        const chunk = stmts.slice(i, i + CHUNK_SIZE);
+        await Promise.all(chunk.map(stmt => stmt.run()));
+    }
+}
+
+async function runIpUpdateTask(env, sources = null) {
+    console.log('开始IP全量更新任务...');
+
+    // --- 0. 确保数据库结构正确 ---
+    await ensureSchema(env);
+
+    // --- 1. 获取配置 ---
+    if (sources === null) {
+        try {
+            const settingsRes = await env.DB.prepare(
+                'SELECT source, enabled FROM auto_update_settings WHERE source IN (?, ?, ?, ?)'
+            ).bind('hostmonit_v4', 'hostmonit_v6', 'vps789', 'global_enabled').all();
+
+            if (settingsRes && settingsRes.results) {
+                sources = {};
+                settingsRes.results.forEach(setting => { sources[setting.source] = setting.enabled === 1; });
+            } else {
+                sources = { hostmonit_v4: true, hostmonit_v6: false, vps789: true, global_enabled: true };
+            }
+        } catch (e) {
+            sources = { hostmonit_v4: true, hostmonit_v6: false, vps789: true, global_enabled: true };
+        }
+    }
+
+    // --- 2. 获取数据 ---
+    const tasks = [];
+    if (sources.hostmonit_v4 !== false) tasks.push(fetchIpsFromHostMonit('v4'));
+    if (sources.hostmonit_v6 !== false) tasks.push(fetchIpsFromHostMonit('v6'));
+    if (sources.vps789 !== false) tasks.push(fetchIpsFromVps789());
+
+    if (tasks.length === 0) return { success: false, message: "没有启用的API源" };
+
+    const results = await Promise.allSettled(tasks);
+    const allIps = [];
+    const sourceStats = {};
+
+    results.forEach((result, index) => {
+        const sourceNames = ['hostmonit_v4', 'hostmonit_v6', 'vps789'];
+        const sourceName = index < sourceNames.length ? sourceNames[index] : `Source_${index}`;
+
+        if (result.status === 'fulfilled') {
+            const ips = result.value;
+            allIps.push(...ips);
+            sourceStats[sourceName] = { count: ips.length, status: 'ok' };
+        } else {
+            sourceStats[sourceName] = { count: 0, status: 'error' };
+        }
+    });
+
+    console.log(`API共获取到 ${allIps.length} 个原始IP`);
+
+    // --- 3. 去重 ---
+    const uniqueMap = new Map();
+    allIps.forEach(i => {
+        if (i && i.ip) {
+            const normalizedIp = i.ip.trim();
+            const carrier = i.carrier || 'ALL';
+            const key = `${normalizedIp}_${carrier}`;
+
+            if (!uniqueMap.has(key)) {
+                uniqueMap.set(key, { ...i, ip: normalizedIp, carrier: carrier });
+            } else {
+                const existing = uniqueMap.get(key);
+                if (existing.source && i.source && !existing.source.includes(i.source)) {
+                    existing.source = `${existing.source}|${i.source}`;
+                }
+            }
+        }
+    });
+
+    const newIpList = Array.from(uniqueMap.values());
+    console.log(`去重后得到 ${newIpList.length} 个有效记录`);
+
+    if (sources.global_enabled === 0) {
+        return { success: true, count: newIpList.length, message: "自动更新已关闭" };
+    }
+
+    try {
+        // --- 4. 清理原数据库中的所有IP ---
+        console.log('清理原数据库中所有IP记录...');
+        await env.DB.prepare('DELETE FROM cfips').run();
+
+        // --- 5. 插入新IP数据 ---
+        let insertedCount = 0;
+        if (newIpList.length > 0) {
+            console.log(`插入 ${newIpList.length} 个新IP记录...`);
+
+            const insertStmts = newIpList.map(i =>
+                env.DB.prepare('INSERT INTO cfips (ip, ip_type, carrier, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+                    .bind(i.ip, i.ip_type || 'v4', i.carrier, i.source, Date.now(), Date.now())
+            );
+
+            await executeInChunks(insertStmts);
+            insertedCount = newIpList.length;
+        }
+
+        // --- 6. 更新最后执行时间 ---
+        await env.DB.prepare('INSERT OR REPLACE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)')
+            .bind('last_executed', 1, Date.now()).run();
+
+        return {
+            success: true,
+            message: `更新成功 (清理了所有旧IP，插入了${insertedCount}个新IP)`,
+            sourceStats,
+            stats: {
+                cleaned: true,
+                inserted: insertedCount
+            }
+        };
+
+    } catch (e) {
+        console.error('Database Sync Error:', e.message);
+        return { success: false, message: "DB Error: " + e.message };
+    }
+}
+
 async function initializeDatabaseSettings(env) {
     console.log('mg_worker.js: checking database tables...');
     try {
@@ -297,7 +532,7 @@ async function initializeDatabaseSettings(env) {
                 used_at INTEGER DEFAULT 0
             );
         `).run();
-        
+
         // 创建 cf_domains 表
         await env.DB.prepare(`
             CREATE TABLE IF NOT EXISTS cf_domains (
@@ -335,7 +570,7 @@ async function initializeDatabaseSettings(env) {
             );
         `).run();
 
-        // 创建 auto_update_settings 表 (需要确保存在，供 mg_worker.js 读取和写入设置，ip-worker.js 读取)
+        // 创建 auto_update_settings 表 (需要确保存在，供 mg_worker.js 读取和写入设置)
         await env.DB.prepare(`
             CREATE TABLE IF NOT EXISTS auto_update_settings (
                 source TEXT PRIMARY KEY,
@@ -359,85 +594,99 @@ async function initializeDatabaseSettings(env) {
         await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_access_logs_date ON config_access_logs (created_at);').run();
 
         console.log('mg_worker.js: D1 database tables checked/initialized.');
+
+        // 初始化默认设置（如果没有的话）
+        const defaultSettings = [
+            { source: 'global_enabled', enabled: 1 },
+            { source: 'hostmonit_v4', enabled: 1 },
+            { source: 'hostmonit_v6', enabled: 0 },
+            { source: 'vps789', enabled: 1 },
+            { source: 'last_executed', enabled: 0 }
+        ];
+
+        for (const setting of defaultSettings) {
+            await env.DB.prepare('INSERT OR IGNORE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)')
+                .bind(setting.source, setting.enabled, Date.now())
+                .run();
+        }
     } catch (e) {
         console.error('mg_worker.js: Failed to check/initialize database tables:', e.message);
     }
 }
 
-
 // =================================================================
-//  5. API处理函数 (已修改)
+//  5. API处理函数
 // =================================================================
 
 async function handleLogin(req, env) {
     try {
         const { username, password, totp_code, step } = await req.json();
-        
+
         const user = await env.DB.prepare(
             'SELECT * FROM admin_users WHERE username = ?'
         ).bind(username).first();
-        
+
         if (!user || (await hashPassword(password)) !== user.password_hash) {
             return jsonResponse({ error: '用户名或密码错误' }, 401);
         }
-        
+
         const requiresMFA = user.mfa_enabled === 1;
-        
+
         if (!step) {
             if (!requiresMFA) {
                 const token = await signJwt(
-                    { 
-                        sub: user.username, 
+                    {
+                        sub: user.username,
                         exp: Date.now() + 86400000,
                         requires_mfa: false
-                    }, 
+                    },
                     env.JWT_SECRET || DEFAULT_JWT_SECRET
                 );
                 return jsonResponse({ token, requires_mfa: false });
             } else {
-                return jsonResponse({ 
-                    requires_mfa: true, 
+                return jsonResponse({
+                    requires_mfa: true,
                     username: user.username,
                     step: 'totp_required'
                 });
             }
         }
-        
+
         if (step === 'verify_totp' && requiresMFA) {
             if (!totp_code) {
                 return jsonResponse({ error: '请输入验证码' }, 400);
             }
-            
+
             if (!user.mfa_secret) {
                 return jsonResponse({ error: 'MFA未设置' }, 400);
             }
-            
+
             const isValid = await TOTP.verify(user.mfa_secret, totp_code, 1);
             if (!isValid) {
                 return jsonResponse({ error: '验证码无效或已过期' }, 401);
             }
-            
+
             await env.DB.prepare(
                 'UPDATE admin_users SET last_mfa_login = ? WHERE username = ?'
             ).bind(Date.now(), user.username).run();
-            
+
             const token = await signJwt(
-                { 
-                    sub: user.username, 
+                {
+                    sub: user.username,
                     exp: Date.now() + 86400000,
                     requires_mfa: true,
                     mfa_verified: true
-                }, 
+                },
                 env.JWT_SECRET || DEFAULT_JWT_SECRET
             );
-            
-            return jsonResponse({ 
-                token, 
+
+            return jsonResponse({
+                token,
                 requires_mfa: true,
                 message: 'MFA验证成功'
             });
         }
-        
+
         return jsonResponse({ error: '无效的登录步骤' }, 400);
     } catch (e) {
         return jsonResponse({ error: '服务器错误' }, 500);
@@ -447,22 +696,22 @@ async function handleLogin(req, env) {
 async function handleMfaInit(req, env) {
     try {
         const { username, password } = await req.json();
-        
+
         const user = await env.DB.prepare(
             'SELECT * FROM admin_users WHERE username = ?'
         ).bind(username).first();
-        
+
         if (!user || (await hashPassword(password)) !== user.password_hash) {
             return jsonResponse({ error: '用户名或密码错误' }, 401);
         }
-        
+
         if (user.mfa_enabled === 1) {
             return jsonResponse({ error: 'MFA已启用' }, 400);
         }
-        
+
         const newSecret = TOTP.generateSecret();
         const otpauth_url = TOTP.generateOTPAuthURL(username, newSecret);
-        
+
         return jsonResponse({
             success: true,
             secret: newSecret,
@@ -479,34 +728,34 @@ async function handleMfaInit(req, env) {
 async function handleMfaVerifyFirst(req, env) {
     try {
         const { username, totp_code, secret } = await req.json();
-        
+
         if (!totp_code || !secret) {
             return jsonResponse({ error: '请提供验证码和密钥' }, 400);
         }
-        
+
         const isValid = await TOTP.verify(secret, totp_code, 1);
         if (!isValid) {
             return jsonResponse({ error: '验证码无效或已过期' }, 400);
         }
-        
-        const backupCodes = Array.from({ length: 10 }, () => 
+
+        const backupCodes = Array.from({ length: 10 }, () =>
             Math.random().toString(36).substring(2, 10).toUpperCase()
         );
-        
+
         await env.DB.prepare(
             'UPDATE admin_users SET mfa_enabled = 1, mfa_secret = ? WHERE username = ?'
         ).bind(secret, username).run();
-        
+
         const stmts = backupCodes.map(code =>
             env.DB.prepare(
                 'INSERT INTO mfa_backup_codes (username, code, created_at, used) VALUES (?, ?, ?, 0)'
             ).bind(username, code, Date.now())
         );
-        
+
         if (stmts.length > 0) {
             await env.DB.batch(stmts);
         }
-        
+
         return jsonResponse({
             success: true,
             message: 'MFA已成功启用',
@@ -521,46 +770,46 @@ async function handleMfaVerifyFirst(req, env) {
 async function handleMfaLoginWithBackup(req, env) {
     try {
         const { username, password, backup_code } = await req.json();
-        
+
         const user = await env.DB.prepare(
             'SELECT * FROM admin_users WHERE username = ? AND mfa_enabled = 1'
         ).bind(username).first();
-        
+
         if (!user || (await hashPassword(password)) !== user.password_hash) {
             return jsonResponse({ error: '用户名或密码错误' }, 401);
         }
-        
+
         const backupRecord = await env.DB.prepare(
             'SELECT * FROM mfa_backup_codes WHERE username = ? AND code = ? AND used = 0'
         ).bind(username, backup_code.trim().toUpperCase()).first();
-        
+
         if (!backupRecord) {
             return jsonResponse({ error: '备份码无效或已使用' }, 401);
         }
-        
+
         await env.DB.prepare(
             'UPDATE mfa_backup_codes SET used = 1, used_at = ? WHERE id = ?'
         ).bind(Date.now(), backupRecord.id).run();
-        
+
         await env.DB.prepare(
             'UPDATE admin_users SET last_backup_login = ? WHERE username = ?'
         ).bind(Date.now(), username).run();
-        
+
         const token = await signJwt(
-            { 
-                sub: user.username, 
+            {
+                sub: user.username,
                 exp: Date.now() + 86400000,
                 requires_mfa: true,
                 mfa_verified: true,
                 via_backup_code: true
-            }, 
+            },
             env.JWT_SECRET || DEFAULT_JWT_SECRET
         );
-        
+
         const remaining = await env.DB.prepare(
             'SELECT COUNT(*) as count FROM mfa_backup_codes WHERE username = ? AND used = 0'
         ).bind(username).first('count') || 0;
-        
+
         return jsonResponse({
             token,
             message: '使用备份码登录成功',
@@ -574,20 +823,20 @@ async function handleMfaLoginWithBackup(req, env) {
 async function handleChangePassword(req, env, currentUser) {
     try {
         const { oldPassword, newPassword } = await req.json();
-        
+
         const user = await env.DB.prepare(
             'SELECT * FROM admin_users WHERE username = ?'
         ).bind(currentUser).first();
-        
+
         if (!user || (await hashPassword(oldPassword)) !== user.password_hash) {
             return jsonResponse({ error: '旧密码错误' }, 403);
         }
-        
+
         await env.DB.prepare(
             'UPDATE admin_users SET password_hash = ? WHERE username = ?'
         ).bind(await hashPassword(newPassword), currentUser).run();
-        
-        return jsonResponse({ 
+
+        return jsonResponse({
             success: true,
             message: '密码修改成功'
         });
@@ -601,11 +850,11 @@ async function handleMfaStatus(req, env, currentUser) {
         const user = await env.DB.prepare(
             'SELECT mfa_enabled, last_mfa_login, last_backup_login FROM admin_users WHERE username = ?'
         ).bind(currentUser).first();
-        
+
         const backupCodesCount = await env.DB.prepare(
             'SELECT COUNT(*) as count FROM mfa_backup_codes WHERE username = ? AND used = 0'
         ).bind(currentUser).first('count') || 0;
-        
+
         return jsonResponse({
             mfa_enabled: user.mfa_enabled === 1,
             last_mfa_login: user.last_mfa_login,
@@ -620,23 +869,23 @@ async function handleMfaStatus(req, env, currentUser) {
 async function handleMfaDisable(req, env, currentUser) {
     try {
         const { password } = await req.json();
-        
+
         const user = await env.DB.prepare(
             'SELECT * FROM admin_users WHERE username = ?'
         ).bind(currentUser).first();
-        
+
         if ((await hashPassword(password)) !== user.password_hash) {
             return jsonResponse({ error: '密码错误' }, 401);
         }
-        
+
         await env.DB.prepare(
             'UPDATE admin_users SET mfa_enabled = 0, mfa_secret = NULL WHERE username = ?'
         ).bind(currentUser).run();
-        
+
         await env.DB.prepare(
             'DELETE FROM mfa_backup_codes WHERE username = ?'
         ).bind(currentUser).run();
-        
+
         return jsonResponse({
             success: true,
             message: 'MFA已禁用'
@@ -649,37 +898,37 @@ async function handleMfaDisable(req, env, currentUser) {
 async function handleMfaRegenerateBackupCodes(req, env, currentUser) {
     try {
         const { password } = await req.json();
-        
+
         const user = await env.DB.prepare(
             'SELECT * FROM admin_users WHERE username = ?'
         ).bind(currentUser).first();
-        
+
         if ((await hashPassword(password)) !== user.password_hash) {
             return jsonResponse({ error: '密码错误' }, 401);
         }
-        
+
         if (user.mfa_enabled !== 1) {
             return jsonResponse({ error: 'MFA未启用' }, 400);
         }
-        
-        const newBackupCodes = Array.from({ length: 10 }, () => 
+
+        const newBackupCodes = Array.from({ length: 10 }, () =>
             Math.random().toString(36).substring(2, 10).toUpperCase()
         );
-        
+
         await env.DB.prepare(
             'DELETE FROM mfa_backup_codes WHERE username = ?'
         ).bind(currentUser).run();
-        
+
         const stmts = newBackupCodes.map(code =>
             env.DB.prepare(
                 'INSERT INTO mfa_backup_codes (username, code, created_at, used) VALUES (?, ?, ?, 0)'
             ).bind(currentUser, code, Date.now())
         );
-        
+
         if (stmts.length > 0) {
             await env.DB.batch(stmts);
         }
-        
+
         return jsonResponse({
             success: true,
             backup_codes: newBackupCodes,
@@ -696,15 +945,15 @@ async function handleGetAutoUpdateSettings(req, env) {
         const settings = await env.DB.prepare(
             'SELECT source, enabled, updated_at FROM auto_update_settings WHERE source IN (?, ?, ?, ?, ?)'
         ).bind('global_enabled', 'hostmonit_v4', 'hostmonit_v6', 'vps789', 'last_executed').all();
-        
-        const result = { 
-            global_enabled: 0, 
-            hostmonit_v4: 1, 
+
+        const result = {
+            global_enabled: 0,
+            hostmonit_v4: 1,
             hostmonit_v6: 0, // 默认不开启IPv6
-            vps789: 1, 
-            last_executed: 0 
+            vps789: 1,
+            last_executed: 0
         };
-        
+
         if (settings && settings.results) {
             settings.results.forEach(setting => {
                 if (setting.source === 'last_executed') {
@@ -725,7 +974,7 @@ async function handleGetAutoUpdateSettings(req, env) {
 async function handleSetAutoUpdateSettings(req, env) {
     try {
         const { global_enabled, hostmonit_v4, hostmonit_v6, vps789 } = await req.json();
-        
+
         const stmts = [
             env.DB.prepare('INSERT OR REPLACE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)')
                 .bind('global_enabled', global_enabled ? 1 : 0, Date.now()),
@@ -736,9 +985,9 @@ async function handleSetAutoUpdateSettings(req, env) {
             env.DB.prepare('INSERT OR REPLACE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)')
                 .bind('vps789', vps789 ? 1 : 0, Date.now())
         ];
-        
+
         await env.DB.batch(stmts);
-        return jsonResponse({ 
+        return jsonResponse({
             success: true,
             message: '自动更新设置已保存'
         });
@@ -748,19 +997,16 @@ async function handleSetAutoUpdateSettings(req, env) {
     }
 }
 
-// 新增代理函数：调用 IP Worker 执行 IP 更新
-async function handleIpWorkerUpdate(req, env) {
+// 直接执行IP更新 (移除外部worker调用)
+async function handleDirectIpUpdate(req, env) {
     try {
-        // mg_worker.js 在这里会验证 JWT token，然后从请求体中获取设置
-        // 这些设置是前端点击“立即更新”时传递过来的当前开关状态
+        // 从前端获取当前开关设置
         const { global_enabled, hostmonit_v4, hostmonit_v6, vps789 } = await req.json();
 
-        // 将这些设置保存到共享数据库，以便 ip-worker.js 可以读取
-        // 注意：这里只更新了相关IP源的enabled状态。
-        // global_enabled 状态在 handleSetAutoUpdateSettings 中设置，也会被 ip-worker.js 读取
+        // 立即保存这些设置到数据库
         const stmts = [
-             env.DB.prepare('INSERT OR REPLACE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)')
-                .bind('global_enabled', global_enabled ? 1 : 0, Date.now()), // 确保 global_enabled 也被传递和保存
+            env.DB.prepare('INSERT OR REPLACE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)')
+                .bind('global_enabled', global_enabled ? 1 : 0, Date.now()),
             env.DB.prepare('INSERT OR REPLACE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)')
                 .bind('hostmonit_v4', hostmonit_v4 ? 1 : 0, Date.now()),
             env.DB.prepare('INSERT OR REPLACE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)')
@@ -769,73 +1015,65 @@ async function handleIpWorkerUpdate(req, env) {
                 .bind('vps789', vps789 ? 1 : 0, Date.now())
         ];
         await env.DB.batch(stmts);
-        
-        // 调用 ip-worker.js 的手动更新接口 (GET 请求，无需认证)
-        const ipWorkerResponse = await fetch(`${IP_WORKER_DOMAIN}/api/ips/update`, {
-            method: 'GET'
-        });
 
-        if (!ipWorkerResponse.ok) {
-            const errorText = await ipWorkerResponse.text();
-            throw new Error(`IP Worker响应错误: ${ipWorkerResponse.status} - ${errorText}`);
-        }
+        // 构建sources对象用于runIpUpdateTask
+        const sources = {
+            global_enabled: global_enabled ? 1 : 0,
+            hostmonit_v4: hostmonit_v4 ? 1 : 0,
+            hostmonit_v6: hostmonit_v6 ? 1 : 0,
+            vps789: vps789 ? 1 : 0
+        };
 
-        const result = await ipWorkerResponse.json();
-        
-        // ip-worker.js 已经更新了 last_executed，这里无需再次更新，直接返回结果即可。
-        // 如果 ip-worker.js 没有更新，此处可以添加一个回退更新逻辑
-        // await env.DB.prepare(
-        //     'INSERT OR REPLACE INTO auto_update_settings (source, enabled, updated_at) VALUES (?, ?, ?)'
-        // ).bind('last_executed', 1, Date.now()).run();
+        // 直接执行IP更新任务
+        const result = await runIpUpdateTask(env, sources);
 
         return jsonResponse(result);
     } catch (error) {
-        console.error('handleIpWorkerUpdate error:', error.message);
-        return jsonResponse({ 
-            success: false, 
-            message: 'IP更新失败: ' + error.message 
+        console.error('handleDirectIpUpdate error:', error.message);
+        return jsonResponse({
+            success: false,
+            message: 'IP更新失败: ' + error.message
         }, 500);
     }
 }
-
 
 // 获取统计数据，其中包含 IP 数量和自动更新状态
 async function handleGetStats(req, env) {
     try {
         const url = new URL(req.url);
         const days = parseInt(url.searchParams.get('days')) || 30;
-        
+
         // 获取基础统计
         const domains = await env.DB.prepare('SELECT COUNT(*) as c FROM cf_domains').first('c');
         const ips = await env.DB.prepare('SELECT COUNT(*) as c FROM cfips').first('c'); // 从共享数据库读取
         const uuids = await env.DB.prepare('SELECT COUNT(DISTINCT uuid) as c FROM configs').first('c');
-        
+
         const enabledSetting = await env.DB.prepare(
             'SELECT enabled FROM auto_update_settings WHERE source = ?'
         ).bind('global_enabled').first();
         const enabled = enabledSetting?.enabled || 0; // If no setting, default to 0 for safety
-        
+
         const lastExecSetting = await env.DB.prepare(
             'SELECT updated_at FROM auto_update_settings WHERE source = ?'
         ).bind('last_executed').first();
         const lastExec = lastExecSetting?.updated_at || 0;
-        
+
         // 获取订阅访问统计
         let accessStats = null;
         try {
             accessStats = await getAccessStatsSummary(env, days);
         } catch (e) {
             console.error("获取访问统计失败:", e.message);
-            accessStats = { 
-                success: false, 
+            accessStats = {
+                success: false,
                 daily_stats: [],
                 popular_uuids: []
             };
         }
-        
-        return jsonResponse({ 
-            domains: domains || 0, 
-            ips: ips || 0, 
+
+        return jsonResponse({
+            domains: domains || 0,
+            ips: ips || 0,
             uuids: uuids || 0,
             autoUpdate: enabled,
             lastExecuted: lastExec,
@@ -854,11 +1092,11 @@ async function handleGetUUIDAccessDetails(req, env) {
         const uuid = url.searchParams.get('uuid');
         const startDate = url.searchParams.get('start_date');
         const endDate = url.searchParams.get('end_date');
-        
+
         if (!uuid) {
             return jsonResponse({ error: '需要提供UUID参数' }, 400);
         }
-        
+
         const details = await getUUIDAccessDetails(env, uuid, startDate, endDate);
         return jsonResponse(details);
     } catch (error) {
@@ -870,7 +1108,7 @@ async function handleGetUUIDAccessDetails(req, env) {
 async function handleDomains(req, env, method) {
     try {
         const url = new URL(req.url);
-        
+
         if (method === 'GET') {
             const page = parseInt(url.searchParams.get('page')) || 1;
             const size = parseInt(url.searchParams.get('size')) || 10;
@@ -884,53 +1122,53 @@ async function handleDomains(req, env, method) {
             const query = `SELECT * FROM cf_domains ORDER BY ${actualSort} ${sortOrder} LIMIT ? OFFSET ?`;
             const { results } = await env.DB.prepare(query).bind(size, offset).all();
 
-            return jsonResponse({ 
-                total: total || 0, 
-                data: results || [], 
-                page, 
-                size 
+            return jsonResponse({
+                total: total || 0,
+                data: results || [],
+                page,
+                size
             });
         }
-        
+
         if (method === 'POST') {
             const { domain, remark } = await req.json();
             if(!domain) return jsonResponse({error:'域名不能为空'}, 400);
-            
+
             await env.DB.prepare(
                 'INSERT INTO cf_domains (domain, remark, created_at) VALUES (?, ?, ?)'
             ).bind(domain, remark || '', Date.now()).run();
-            
-            return jsonResponse({ 
+
+            return jsonResponse({
                 success: true,
                 message: '域名添加成功'
             });
         }
-        
+
         if (method === 'PUT') {
             const { id, domain, remark } = await req.json();
             if(!id || !domain) return jsonResponse({error:'ID和域名不能为空'}, 400);
-            
+
             await env.DB.prepare(
                 'UPDATE cf_domains SET domain = ?, remark = ? WHERE id = ?'
             ).bind(domain, remark || '', id).run();
-            
-            return jsonResponse({ 
+
+            return jsonResponse({
                 success: true,
                 message: '域名更新成功'
             });
         }
-        
+
         if (method === 'DELETE') {
             const { id } = await req.json();
             if (!id) return jsonResponse({error:'ID不能为空'}, 400);
-            
+
             await env.DB.prepare('DELETE FROM cf_domains WHERE id = ?').bind(id).run();
-            return jsonResponse({ 
+            return jsonResponse({
                 success: true,
                 message: '域名删除成功'
             });
         }
-        
+
         return jsonResponse({ error: '不支持的请求方法' }, 405);
     } catch (error) {
         console.error('handleDomains error:', error.message);
@@ -942,13 +1180,13 @@ async function handleDomains(req, env, method) {
 async function handleIps(req, env, method) {
     try {
         const url = new URL(req.url);
-        
+
         if (method === 'GET') {
             const page = parseInt(url.searchParams.get('page')) || 1;
             const size = parseInt(url.searchParams.get('size')) || 20;
             const sortField = url.searchParams.get('sort') || 'created_at';
             const sortOrder = (url.searchParams.get('order') || 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
-            
+
             const allowedSorts = ['ip', 'ip_type', 'carrier', 'source', 'created_at'];
             const actualSort = allowedSorts.includes(sortField) ? sortField : 'created_at';
             const offset = (page - 1) * size;
@@ -957,25 +1195,25 @@ async function handleIps(req, env, method) {
             const query = `SELECT * FROM cfips ORDER BY ${actualSort} ${sortOrder} LIMIT ? OFFSET ?`;
             const { results } = await env.DB.prepare(query).bind(size, offset).all();
 
-            return jsonResponse({ 
-                total: total || 0, 
-                data: results || [], 
-                page, 
-                size 
+            return jsonResponse({
+                total: total || 0,
+                data: results || [],
+                page,
+                size
             });
         }
-        
+
         if (method === 'DELETE') {
             const { ip } = await req.json();
             if (!ip) return jsonResponse({error:'IP不能为空'}, 400);
-            
+
             await env.DB.prepare('DELETE FROM cfips WHERE ip = ?').bind(ip).run();
-            return jsonResponse({ 
+            return jsonResponse({
                 success: true,
                 message: 'IP删除成功'
             });
         }
-        
+
         return jsonResponse({ error: '不支持的请求方法' }, 405);
     } catch (error) {
         console.error('handleIps error:', error.message);
@@ -983,19 +1221,16 @@ async function handleIps(req, env, method) {
     }
 }
 
-// 移除 handleIpsRefresh (原始代码中的提示性函数)，由新的 handleIpWorkerUpdate 代理 IP 更新
-// async function handleIpsRefresh(req, env) { ... }
-
 async function handleUuids(req, env, method) {
     try {
         const url = new URL(req.url);
-        
+
         if (method === 'GET') {
             const page = parseInt(url.searchParams.get('page')) || 1;
             const size = parseInt(url.searchParams.get('size')) || 10;
             const sortField = url.searchParams.get('sort') || 'updated_at';
             const sortOrder = (url.searchParams.get('order') || 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
-            
+
             const allowedSorts = ['uuid', 'count', 'updated_at'];
             const actualSort = allowedSorts.includes(sortField) ? sortField : 'updated_at';
             const offset = (page - 1) * size;
@@ -1004,25 +1239,25 @@ async function handleUuids(req, env, method) {
             const query = `SELECT uuid, COUNT(*) as count, MAX(created_at) as updated_at FROM configs GROUP BY uuid ORDER BY ${actualSort} ${sortOrder} LIMIT ? OFFSET ?`;
             const { results } = await env.DB.prepare(query).bind(size, offset).all();
 
-            return jsonResponse({ 
-                total: total || 0, 
-                data: results || [], 
-                page, 
-                size 
+            return jsonResponse({
+                total: total || 0,
+                data: results || [],
+                page,
+                size
             });
         }
-        
+
         if (method === 'DELETE') {
             const { uuid } = await req.json();
             if (!uuid) return jsonResponse({error:'UUID不能为空'}, 400);
-            
+
             await env.DB.prepare('DELETE FROM configs WHERE uuid = ?').bind(uuid).run();
-            return jsonResponse({ 
+            return jsonResponse({
                 success: true,
                 message: 'UUID组删除成功'
             });
         }
-        
+
         return jsonResponse({ error: '不支持的请求方法' }, 405);
     } catch (error) {
         console.error('handleUuids error:', error.message);
@@ -1044,87 +1279,87 @@ async function handleApi(req, env) {
         if (path === '/api/login' && method === 'POST') {
             return await handleLogin(req, env);
         }
-        
+
         if (path === '/api/mfa/init' && method === 'POST') {
             return await handleMfaInit(req, env);
         }
-        
+
         if (path === '/api/mfa/verify-first' && method === 'POST') {
             return await handleMfaVerifyFirst(req, env);
         }
-        
+
         if (path === '/api/mfa/login-with-backup' && method === 'POST') {
             return await handleMfaLoginWithBackup(req, env);
         }
-        
+
         // 需要JWT认证的API
         const authHeader = req.headers.get('Authorization');
         if (!authHeader || !authHeader.startsWith('Bearer ')) {
             return jsonResponse({ error: '未授权，请重新登录' }, 401);
         }
-        
+
         const token = authHeader.split(' ')[1];
         const payload = await verifyJwt(token, env.JWT_SECRET || DEFAULT_JWT_SECRET);
-        
+
         if (!payload) {
             return jsonResponse({ error: 'Token 无效或已过期' }, 401);
         }
-        
+
         const currentUser = payload.sub;
-        
+
         // 认证后的API
         if (path === '/api/change-password' && method === 'POST') {
             return await handleChangePassword(req, env, currentUser);
         }
-        
+
         if (path === '/api/mfa/status' && method === 'GET') {
             return await handleMfaStatus(req, env, currentUser);
         }
-        
+
         if (path === '/api/mfa/disable' && method === 'POST') {
             return await handleMfaDisable(req, env, currentUser);
         }
-        
+
         if (path === '/api/mfa/backup-codes/regenerate' && method === 'POST') {
             return await handleMfaRegenerateBackupCodes(req, env, currentUser);
         }
-        
+
         if (path === '/api/settings/auto-update' && method === 'GET') {
             return await handleGetAutoUpdateSettings(req, env);
         }
-        
+
         if (path === '/api/settings/auto-update' && method === 'POST') {
             return await handleSetAutoUpdateSettings(req, env);
         }
-        
+
         if (path === '/api/stats' && method === 'GET') {
             return await handleGetStats(req, env);
         }
-        
+
         // 新增API：获取UUID访问详情
         if (path === '/api/stats/uuid-details' && method === 'GET') {
             return await handleGetUUIDAccessDetails(req, env);
         }
-        
+
         if (path === '/api/domains' && ['GET', 'POST', 'PUT', 'DELETE'].includes(method)) {
             return await handleDomains(req, env, method);
         }
-        
+
         if (path === '/api/ips' && ['GET', 'DELETE'].includes(method)) {
             return await handleIps(req, env, method);
         }
-        
-        // 新的 IP 刷新接口，由 mg_worker.js 代理到 ip-worker.js
-        if (path === '/api/ips/refresh' && method === 'POST') {
-            return await handleIpWorkerUpdate(req, env);
+
+        // 新的直接IP更新接口
+        if (path === '/api/ips/update' && method === 'POST') {
+            return await handleDirectIpUpdate(req, env);
         }
-        
+
         if (path === '/api/uuids' && ['GET', 'DELETE'].includes(method)) {
             return await handleUuids(req, env, method);
         }
-        
+
         return jsonResponse({ error: 'API端点不存在' }, 404);
-        
+
     } catch (error) {
         console.error('API处理错误:', error);
         return jsonResponse({ error: '服务器内部错误: ' + error.message }, 500);
@@ -1677,7 +1912,7 @@ const adminHtml = `
                     <input type="text" id="newD" placeholder="域名 (例如: cf.example.com)" style="flex:2; margin:0">
                     <input type="text" id="newR" placeholder="自定义备注" style="flex:1; margin:0">
                     <button class="nav-btn active" onclick="addDomain()">添加域名</button>
-                </div>
+                    </div>
                 <div class="table-container">
                     <table>
                         <thead>
@@ -2855,8 +3090,8 @@ const adminHtml = `
             if(d && d.data) {
                 let h = '';
                 d.data.forEach(i => {
-                    const domainSafe = (i.domain || '').replace(/"/g, '&quot;');
-                    const remarkSafe = (i.remark || '').replace(/"/g, '&quot;');
+                    const domainSafe = (i.domain || '').replace(/"/g, '"');
+                    const remarkSafe = (i.remark || '').replace(/"/g, '"');
                     h += \`<tr><td>\${i.id}</td><td>\${i.domain}</td><td>\${i.remark||'<span style="color:#ccc">无</span>'}</td><td>\${fmtDate(i.created_at)}</td><td><button class="nav-btn small" onclick="editD(\${i.id}, '\${domainSafe}', '\${remarkSafe}')">编辑</button> <button class="nav-btn danger small" onclick="delD(\${i.id})">删除</button></td></tr>\`;
                 });
                 document.getElementById('domList').innerHTML = h || '<tr><td colspan="5" style="text-align:center">无数据</td></tr>';
@@ -2938,7 +3173,7 @@ const adminHtml = `
             }
         }
         
-        // 修改 refreshIps 函数以调用 mg_worker.js 后端代理
+        // 修改 refreshIps 函数以调用新的直接更新接口
         async function refreshIps() {
             const globalEnabled = document.getElementById('sw-global').checked;
             const hmV4 = document.getElementById('sw-hm-v4').checked; 
@@ -2957,9 +3192,8 @@ const adminHtml = `
             toast('IP更新任务已开始...', 'info');
             
             try {
-                // 调用 mg_worker.js 的 /api/ips/refresh 接口
-                // mg_worker.js 后端会负责保存这些设置，并代理请求到 ip-worker.js
-                const res = await api('ips/refresh', 'POST', {
+                // 调用新的直接更新接口 /api/ips/update
+                const res = await api('ips/update', 'POST', {
                     global_enabled: globalEnabled, // 确保 global_enabled 也被传递
                     hostmonit_v4: hmV4, 
                     hostmonit_v6: hmV6,
@@ -3082,13 +3316,13 @@ const adminHtml = `
 `;
 
 // =================================================================
-//  8. 主入口 (移除定时任务)
+//  8. 主入口 (添加定时任务)
 // =================================================================
 
 export default {
     async fetch(request, env, ctx) {
         const url = new URL(request.url);
-        
+
         // 确保数据库设置已初始化
         ctx.waitUntil(initializeDatabaseSettings(env));
 
@@ -3096,26 +3330,36 @@ export default {
         if (url.pathname.startsWith('/api')) {
             return await handleApi(request, env);
         }
-        
+
         // 处理静态页面
         if (url.pathname === '/login') {
-            return new Response(loginHtml, { 
-                headers: { 
+            return new Response(loginHtml, {
+                headers: {
                     'Content-Type': 'text/html;charset=UTF-8',
                     'Cache-Control': 'no-cache, no-store, must-revalidate'
-                } 
+                }
             });
         }
-        
+
         // 默认返回管理页面
-        return new Response(adminHtml, { 
-            headers: { 
+        return new Response(adminHtml, {
+            headers: {
                 'Content-Type': 'text/html;charset=UTF-8',
                 'Cache-Control': 'no-cache, no-store, must-revalidate'
-            } 
+            }
         });
     },
-    
-    // 移除定时任务，IP更新相关的定时调度由 ip-worker.js 处理
-    // async scheduled(event, env, ctx) { ... }
+
+    // 添加定时任务，自动执行IP更新
+    async scheduled(event, env, ctx) {
+        ctx.waitUntil((async () => {
+            try {
+                console.log('开始定时IP更新任务...');
+                await runIpUpdateTask(env);
+                console.log('定时IP更新任务完成');
+            } catch (error) {
+                console.error('定时IP更新任务失败:', error.message);
+            }
+        })());
+    }
 };
