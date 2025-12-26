@@ -4,15 +4,16 @@
 -- ========================================================
 
 -- ========================================================
--- 0. 用户表 (新增 - 核心功能)
+-- 0. 用户表
 -- ========================================================
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE,          -- 登录用户名
     email TEXT,                             -- 邮箱（可选，可用于找回密码等）
-    password_hash TEXT NOT NULL,            -- bcrypt 或 SHA-256 加密后的密码
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s')),
-    updated_at INTEGER NOT NULL DEFAULT (strftime('%s'))
+    password_hash TEXT NOT NULL,            -- SHA-256 或其他强哈希算法加密后的密码
+    salt TEXT NOT NULL,                     -- 新增盐值字段，与密码哈希配合使用
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s')), -- 秒级时间戳
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s'))  -- 秒级时间戳
 );
 
 -- 用户表索引
@@ -20,7 +21,7 @@ CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 
 -- ========================================================
--- 1. 配置表 (存储代理配置 - 已有表，保留)
+-- 1. 配置表 
 -- ========================================================
 CREATE TABLE IF NOT EXISTS configs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,7 +45,20 @@ CREATE INDEX IF NOT EXISTS idx_configs_uuid_config ON configs(uuid, config_data)
 CREATE INDEX IF NOT EXISTS idx_configs_user_id ON configs(user_id);  -- 新增索引
 
 -- ========================================================
--- 2. 访问日志表 (记录配置访问统计 - 已有表，保留)
+-- 2. uuid关联表
+-- ========================================================
+CREATE TABLE IF NOT EXISTS uuids (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid TEXT NOT NULL UNIQUE,
+    user_id INTEGER, -- 所属用户ID，NULL表示未被认领
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s')),
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s')),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+
+-- ========================================================
+-- 3. 访问日志表 
 -- ========================================================
 CREATE TABLE IF NOT EXISTS config_access_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,7 +81,7 @@ CREATE INDEX IF NOT EXISTS idx_access_logs_client_ip ON config_access_logs(clien
 CREATE INDEX IF NOT EXISTS idx_access_logs_uuid_date ON config_access_logs(uuid, created_at);
 
 -- ========================================================
--- 3. 用户管理表 (管理员账户 - 已有表，保留)
+-- 4. 用户管理表
 -- ========================================================
 CREATE TABLE IF NOT EXISTS admin_users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,7 +98,7 @@ CREATE TABLE IF NOT EXISTS admin_users (
 CREATE INDEX IF NOT EXISTS idx_admin_users_username ON admin_users(username);
 
 -- ========================================================
--- 4. IP池表 (存储优选IP地址 - 已有表，保留)
+-- 5. IP池表
 -- ========================================================
 CREATE TABLE IF NOT EXISTS cfips (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -104,7 +118,7 @@ CREATE INDEX IF NOT EXISTS idx_cfips_source ON cfips(source);
 CREATE INDEX IF NOT EXISTS idx_cfips_latency ON cfips(latency);
 
 -- ========================================================
--- 5. 优选域名表 (已有表，保留)
+-- 6. 优选域名表
 -- ========================================================
 CREATE TABLE IF NOT EXISTS cf_domains (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -118,7 +132,7 @@ CREATE TABLE IF NOT EXISTS cf_domains (
 CREATE INDEX IF NOT EXISTS idx_cf_domains_domain ON cf_domains(domain);
 
 -- ========================================================
--- 6. 自动更新设置表 (已有表，保留)
+-- 7. 自动更新设置表
 -- ========================================================
 CREATE TABLE IF NOT EXISTS auto_update_settings (
     source TEXT PRIMARY KEY,              -- 来源标识
@@ -128,7 +142,7 @@ CREATE TABLE IF NOT EXISTS auto_update_settings (
 );
 
 -- ========================================================
--- 7. MFA备份码表 (已有表，保留)
+-- 8. MFA备份码表
 -- ========================================================
 CREATE TABLE IF NOT EXISTS mfa_backup_codes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -145,7 +159,7 @@ CREATE INDEX IF NOT EXISTS idx_mfa_backup_codes_user ON mfa_backup_codes(usernam
 CREATE INDEX IF NOT EXISTS idx_mfa_backup_codes_used ON mfa_backup_codes(used);
 
 -- ========================================================
--- 8. 系统日志表 (已有表，保留)
+-- 9. 系统日志表
 -- ========================================================
 CREATE TABLE IF NOT EXISTS system_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -163,7 +177,7 @@ CREATE INDEX IF NOT EXISTS idx_system_logs_action ON system_logs(action);
 CREATE INDEX IF NOT EXISTS idx_system_logs_created ON system_logs(created_at);
 
 -- ========================================================
--- 9. API访问统计表 (已有表，保留)
+-- 10. API访问统计表
 -- ========================================================
 CREATE TABLE IF NOT EXISTS api_access_stats (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -179,7 +193,7 @@ CREATE INDEX IF NOT EXISTS idx_api_access_stats_endpoint ON api_access_stats(end
 CREATE INDEX IF NOT EXISTS idx_api_access_stats_method ON api_access_stats(method);
 
 -- ========================================================
--- 10. 初始化数据和升级语句
+-- 11. 初始化数据和升级语句
 -- ========================================================
 
 -- 初始化默认管理员账户 (如果不存在)
@@ -195,7 +209,7 @@ INSERT OR IGNORE INTO auto_update_settings (source, enabled, update_interval) VA
 ('last_executed', 0, 0);               -- 上次执行时间戳
 
 -- ========================================================
--- 11. 数据库升级检查与兼容性处理
+-- 12. 数据库升级检查与兼容性处理
 -- ========================================================
 
 -- 检查configs表是否需要新增user_id外键索引 (如果是从旧版升级)
@@ -213,7 +227,7 @@ INSERT OR IGNORE INTO auto_update_settings (source, enabled, update_interval) VA
 -- END;
 
 -- ========================================================
--- 12. 视图定义 (可选，根据需求创建)
+-- 13. 视图定义 (可选，根据需求创建)
 -- ========================================================
 
 -- 创建每日访问统计视图
@@ -275,7 +289,7 @@ GROUP BY domain_hosting
 ORDER BY config_count DESC;
 
 -- ========================================================
--- 13. 查询系统信息
+-- 14. 查询系统信息
 -- ========================================================
 
 -- 显示所有表信息
@@ -317,7 +331,7 @@ UNION ALL
 SELECT 'cf_domains 记录数:', COUNT(*) FROM cf_domains;
 
 -- ========================================================
--- 14. 数据库维护和优化建议
+-- 15. 数据库维护和优化建议
 -- ========================================================
 
 -- 定期维护建议 (可以根据需要定期执行)
